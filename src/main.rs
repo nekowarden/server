@@ -146,7 +146,7 @@ fn parse_args() {
 
 fn launch_info() {
     println!("/--------------------------------------------------------------------\\");
-    println!("|                        Starting Vaultwarden                        |");
+    println!("|                        Starting Nekowarden                         |");
 
     if let Some(version) = VERSION {
         println!("|{:^68}|", format!("Version {version}"));
@@ -155,10 +155,8 @@ fn launch_info() {
     println!("|--------------------------------------------------------------------|");
     println!("| This is an *unofficial* Bitwarden implementation, DO NOT use the   |");
     println!("| official channels to report bugs/features, regardless of client.   |");
-    println!("| Send usage/configuration questions or feature requests to:         |");
-    println!("|   https://vaultwarden.discourse.group/                             |");
     println!("| Report suspected bugs/issues in the software itself at:            |");
-    println!("|   https://github.com/dani-garcia/vaultwarden/issues/new            |");
+    println!("|   https://github.com/nekowarden/server/issues/new                  |");
     println!("\\--------------------------------------------------------------------/\n");
 }
 
