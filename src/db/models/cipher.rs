@@ -158,10 +158,8 @@ impl Cipher {
             }
         }
 
-        if self.atype == 2 {
-            if type_data_json["Type"] == Value::Null {
-                type_data_json["Type"] = Value::from(0);
-            }
+        if self.atype == 2 && type_data_json["Type"] == Value::Null {
+            type_data_json["Type"] = Value::from(0);
         }
 
         // Clone the type_data and add some default value.
