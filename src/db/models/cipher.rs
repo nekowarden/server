@@ -6,7 +6,7 @@ use super::{
     Attachment, CollectionCipher, Favorite, FolderCipher, Group, User, UserOrgStatus, UserOrgType, UserOrganization,
 };
 
-use crate::api::core::{CipherData, CipherSyncData};
+use crate::api::core::{CipherData, CipherSyncData, CipherSyncType};
 
 use std::borrow::Cow;
 
@@ -22,6 +22,8 @@ db_object! {
 
         pub user_uuid: Option<String>,
         pub organization_uuid: Option<String>,
+
+        pub key: Option<String>,
 
         /*
         Login = 1,
@@ -60,6 +62,8 @@ impl Cipher {
 
             user_uuid: None,
             organization_uuid: None,
+
+            key: None,
 
             atype,
             name,
@@ -114,6 +118,7 @@ impl Cipher {
         host: &str,
         user_uuid: &str,
         cipher_sync_data: Option<&CipherSyncData>,
+        sync_type: CipherSyncType,
         conn: &mut DbConn,
     ) -> Value {
         use crate::util::format_date;
@@ -134,17 +139,24 @@ impl Cipher {
         let password_history_json =
             self.password_history.as_ref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
 
-        let (read_only, hide_passwords) = match self.get_access_restrictions(user_uuid, cipher_sync_data, conn).await {
-            Some((ro, hp)) => (ro, hp),
-            None => {
-                error!("Cipher ownership assertion failure");
-                (true, true)
+        // We don't need these values at all for Organizational syncs
+        // Skip any other database calls if this is the case and just return false.
+        let (read_only, hide_passwords) = if sync_type == CipherSyncType::User {
+            match self.get_access_restrictions(user_uuid, cipher_sync_data, conn).await {
+                Some((ro, hp)) => (ro, hp),
+                None => {
+                    error!("Cipher ownership assertion failure");
+                    (true, true)
+                }
             }
+        } else {
+            (false, false)
         };
 
         // Get the type_data or a default to an empty json object '{}'.
         // If not passing an empty object, mobile clients will crash.
-        let mut type_data_json: Value = serde_json::from_str(&self.data).unwrap_or_else(|_| json!({}));
+        let mut type_data_json: Value =
+            serde_json::from_str(&self.data).unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
 
         // NOTE: This was marked as *Backwards Compatibility Code*, but as of January 2021 this is still being used by upstream
         // Set the first element of the Uris array as Uri, this is needed several (mobile) clients.
@@ -167,10 +179,10 @@ impl Cipher {
 
         // NOTE: This was marked as *Backwards Compatibility Code*, but as of January 2021 this is still being used by upstream
         // data_json should always contain the following keys with every atype
-        data_json["Fields"] = json!(fields_json);
+        data_json["Fields"] = fields_json.clone();
         data_json["Name"] = json!(self.name);
         data_json["Notes"] = json!(self.notes);
-        data_json["PasswordHistory"] = json!(password_history_json);
+        data_json["PasswordHistory"] = password_history_json.clone();
 
         let collection_ids = if let Some(cipher_sync_data) = cipher_sync_data {
             if let Some(cipher_collections) = cipher_sync_data.cipher_collections.get(&self.uuid) {
@@ -196,10 +208,9 @@ impl Cipher {
             "CreationDate": format_date(&self.created_at),
             "RevisionDate": format_date(&self.updated_at),
             "DeletedDate": self.deleted_at.map_or(Value::Null, |d| Value::String(format_date(&d))),
-            "FolderId": if let Some(cipher_sync_data) = cipher_sync_data { cipher_sync_data.cipher_folders.get(&self.uuid).map(|c| c.to_string() ) } else { self.get_folder_uuid(user_uuid, conn).await },
-            "Favorite": if let Some(cipher_sync_data) = cipher_sync_data { cipher_sync_data.cipher_favorites.contains(&self.uuid) } else { self.is_favorite(user_uuid, conn).await },
             "Reprompt": self.reprompt.unwrap_or(RepromptType::None as i32),
             "OrganizationId": self.organization_uuid,
+            "Key": self.key,
             "Attachments": attachments_json,
             // We have UseTotp set to true by default within the Organization model.
             // This variable together with UsersGetPremium is used to show or hide the TOTP counter.
@@ -214,12 +225,6 @@ impl Cipher {
 
             "Data": data_json,
 
-            // These values are true by default, but can be false if the
-            // cipher belongs to a collection where the org owner has enabled
-            // the "Read Only" or "Hide Passwords" restrictions for the user.
-            "Edit": !read_only,
-            "ViewPassword": !hide_passwords,
-
             "PasswordHistory": password_history_json,
 
             // All Cipher types are included by default as null, but only the matching one will be populated
@@ -228,6 +233,27 @@ impl Cipher {
             "Card": null,
             "Identity": null,
         });
+
+        // These values are only needed for user/default syncs
+        // Not during an organizational sync like `get_org_details`
+        // Skip adding these fields in that case
+        if sync_type == CipherSyncType::User {
+            json_object["FolderId"] = json!(if let Some(cipher_sync_data) = cipher_sync_data {
+                cipher_sync_data.cipher_folders.get(&self.uuid).map(|c| c.to_string())
+            } else {
+                self.get_folder_uuid(user_uuid, conn).await
+            });
+            json_object["Favorite"] = json!(if let Some(cipher_sync_data) = cipher_sync_data {
+                cipher_sync_data.cipher_favorites.contains(&self.uuid)
+            } else {
+                self.is_favorite(user_uuid, conn).await
+            });
+            // These values are true by default, but can be false if the
+            // cipher belongs to a collection or group where the org owner has enabled
+            // the "Read Only" or "Hide Passwords" restrictions for the user.
+            json_object["Edit"] = json!(!read_only);
+            json_object["ViewPassword"] = json!(!hide_passwords);
+        }
 
         let key = match self.atype {
             1 => "Login",
@@ -744,6 +770,7 @@ impl Cipher {
             .or_filter(groups::access_all.eq(true)) //Access via group
             .or_filter(collections_groups::collections_uuid.is_not_null()) //Access via group
             .select(ciphers_collections::all_columns)
+            .distinct()
             .load::<(String, String)>(conn).unwrap_or_default()
         }}
     }

@@ -1,8 +1,9 @@
+use chrono::{NaiveDateTime, Utc};
 use num_traits::FromPrimitive;
 use serde_json::Value;
 use std::cmp::Ordering;
 
-use super::{CollectionUser, GroupUser, OrgPolicy, OrgPolicyType, TwoFactor, User};
+use super::{CollectionUser, Group, GroupUser, OrgPolicy, OrgPolicyType, TwoFactor, User};
 use crate::CONFIG;
 
 db_object! {
@@ -29,6 +30,19 @@ db_object! {
         pub akey: String,
         pub status: i32,
         pub atype: i32,
+        pub reset_password_key: Option<String>,
+        pub external_id: Option<String>,
+    }
+
+    #[derive(Identifiable, Queryable, Insertable, AsChangeset)]
+    #[diesel(table_name = organization_api_key)]
+    #[diesel(primary_key(uuid, org_uuid))]
+    pub struct OrganizationApiKey {
+        pub uuid: String,
+        pub org_uuid: String,
+        pub atype: i32,
+        pub api_key: String,
+        pub revision_date: NaiveDateTime,
     }
 }
 
@@ -156,9 +170,9 @@ impl Organization {
             "UseSso": false, // Not supported
             // "UseKeyConnector": false, // Not supported
             "SelfHost": true,
-            "UseApi": false, // Not supported
+            "UseApi": true,
             "HasPublicAndPrivateKeys": self.private_key.is_some() && self.public_key.is_some(),
-            "UseResetPassword": false, // Not supported
+            "UseResetPassword": CONFIG.mail_enabled(),
 
             "BusinessName": null,
             "BusinessAddress1": null,
@@ -194,19 +208,55 @@ impl UserOrganization {
             akey: String::new(),
             status: UserOrgStatus::Accepted as i32,
             atype: UserOrgType::User as i32,
+            reset_password_key: None,
+            external_id: None,
         }
     }
 
-    pub fn restore(&mut self) {
+    pub fn restore(&mut self) -> bool {
         if self.status < UserOrgStatus::Accepted as i32 {
             self.status += ACTIVATE_REVOKE_DIFF;
+            return true;
+        }
+        false
+    }
+
+    pub fn revoke(&mut self) -> bool {
+        if self.status > UserOrgStatus::Revoked as i32 {
+            self.status -= ACTIVATE_REVOKE_DIFF;
+            return true;
+        }
+        false
+    }
+
+    pub fn set_external_id(&mut self, external_id: Option<String>) -> bool {
+        //Check if external id is empty. We don't want to have
+        //empty strings in the database
+        if self.external_id != external_id {
+            self.external_id = match external_id {
+                Some(external_id) if !external_id.is_empty() => Some(external_id),
+                _ => None,
+            };
+            return true;
+        }
+        false
+    }
+}
+
+impl OrganizationApiKey {
+    pub fn new(org_uuid: String, api_key: String) -> Self {
+        Self {
+            uuid: crate::util::get_uuid(),
+
+            org_uuid,
+            atype: 0, // Type 0 is the default and only type we support currently
+            api_key,
+            revision_date: Utc::now().naive_utc(),
         }
     }
 
-    pub fn revoke(&mut self) {
-        if self.status > UserOrgStatus::Revoked as i32 {
-            self.status -= ACTIVATE_REVOKE_DIFF;
-        }
+    pub fn check_valid_api_key(&self, api_key: &str) -> bool {
+        crate::crypto::ct_eq(&self.api_key, api_key)
     }
 }
 
@@ -265,6 +315,7 @@ impl Organization {
         Collection::delete_all_by_organization(&self.uuid, conn).await?;
         UserOrganization::delete_all_by_organization(&self.uuid, conn).await?;
         OrgPolicy::delete_all_by_organization(&self.uuid, conn).await?;
+        Group::delete_all_by_organization(&self.uuid, conn).await?;
 
         db_run! { conn: {
             diesel::delete(organizations::table.filter(organizations::uuid.eq(self.uuid)))
@@ -308,10 +359,11 @@ impl UserOrganization {
             "UseTotp": true,
             // "UseScim": false, // Not supported (Not AGPLv3 Licensed)
             "UsePolicies": true,
-            "UseApi": false, // Not supported
+            "UseApi": true,
             "SelfHost": true,
             "HasPublicAndPrivateKeys": org.private_key.is_some() && org.public_key.is_some(),
-            "ResetPasswordEnrolled": false, // Not supported
+            "ResetPasswordEnrolled": self.reset_password_key.is_some(),
+            "UseResetPassword": CONFIG.mail_enabled(),
             "SsoBound": false, // Not supported
             "UseSso": false, // Not supported
             "ProviderId": null,
@@ -322,7 +374,7 @@ impl UserOrganization {
             // TODO: Add support for Custom User Roles
             // See: https://bitwarden.com/help/article/user-types-access-control/#custom-role
             // "Permissions": {
-            //     "AccessEventLogs": false, // Not supported
+            //     "AccessEventLogs": false,
             //     "AccessImportExport": false,
             //     "AccessReports": false,
             //     "ManageAllCollections": false,
@@ -333,9 +385,9 @@ impl UserOrganization {
             //     "editAssignedCollections": false,
             //     "deleteAssignedCollections": false,
             //     "ManageCiphers": false,
-            //     "ManageGroups": false, // Not supported
+            //     "ManageGroups": false,
             //     "ManagePolicies": false,
-            //     "ManageResetPassword": false, // Not supported
+            //     "ManageResetPassword": false,
             //     "ManageSso": false, // Not supported
             //     "ManageUsers": false,
             //     "ManageScim": false, // Not supported (Not AGPLv3 Licensed)
@@ -354,11 +406,16 @@ impl UserOrganization {
         })
     }
 
-    pub async fn to_json_user_details(&self, conn: &mut DbConn) -> Value {
+    pub async fn to_json_user_details(
+        &self,
+        include_collections: bool,
+        include_groups: bool,
+        conn: &mut DbConn,
+    ) -> Value {
         let user = User::find_by_uuid(&self.user_uuid, conn).await.unwrap();
 
         // Because BitWarden want the status to be -1 for revoked users we need to catch that here.
-        // We subtract/add a number so we can restore/activate the user to it's previouse state again.
+        // We subtract/add a number so we can restore/activate the user to it's previous state again.
         let status = if self.status < UserOrgStatus::Revoked as i32 {
             UserOrgStatus::Revoked as i32
         } else {
@@ -367,16 +424,44 @@ impl UserOrganization {
 
         let twofactor_enabled = !TwoFactor::find_by_user(&user.uuid, conn).await.is_empty();
 
+        let groups: Vec<String> = if include_groups && CONFIG.org_groups_enabled() {
+            GroupUser::find_by_user(&self.uuid, conn).await.iter().map(|gu| gu.groups_uuid.clone()).collect()
+        } else {
+            // The Bitwarden clients seem to call this API regardless of whether groups are enabled,
+            // so just act as if there are no groups.
+            Vec::with_capacity(0)
+        };
+
+        let collections: Vec<Value> = if include_collections {
+            CollectionUser::find_by_organization_and_user_uuid(&self.org_uuid, &self.user_uuid, conn)
+                .await
+                .iter()
+                .map(|cu| {
+                    json!({
+                        "Id": cu.collection_uuid,
+                        "ReadOnly": cu.read_only,
+                        "HidePasswords": cu.hide_passwords,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::with_capacity(0)
+        };
+
         json!({
             "Id": self.uuid,
             "UserId": self.user_uuid,
             "Name": user.name,
             "Email": user.email,
+            "ExternalId": self.external_id,
+            "Groups": groups,
+            "Collections": collections,
 
             "Status": status,
             "Type": self.atype,
             "AccessAll": self.access_all,
             "TwoFactorEnabled": twofactor_enabled,
+            "ResetPasswordEnrolled": self.reset_password_key.is_some(),
 
             "Object": "organizationUserUserDetails",
         })
@@ -409,7 +494,7 @@ impl UserOrganization {
         };
 
         // Because BitWarden want the status to be -1 for revoked users we need to catch that here.
-        // We subtract/add a number so we can restore/activate the user to it's previouse state again.
+        // We subtract/add a number so we can restore/activate the user to it's previous state again.
         let status = if self.status < UserOrgStatus::Revoked as i32 {
             UserOrgStatus::Revoked as i32
         } else {
@@ -445,7 +530,7 @@ impl UserOrganization {
                             .set(UserOrganizationDb::to_db(self))
                             .execute(conn)
                             .map_res("Error adding user to organization")
-                    }
+                    },
                     Err(e) => Err(e.into()),
                 }.map_res("Error adding user to organization")
             }
@@ -679,6 +764,7 @@ impl UserOrganization {
                 )
             )
             .select(users_organizations::all_columns)
+            .distinct()
             .load::<UserOrganizationDb>(conn).expect("Error loading user organizations").from_db()
         }}
     }
@@ -709,6 +795,61 @@ impl UserOrganization {
             )
             .select(users_organizations::all_columns)
             .load::<UserOrganizationDb>(conn).expect("Error loading user organizations").from_db()
+        }}
+    }
+
+    pub async fn find_by_external_id_and_org(ext_id: &str, org_uuid: &str, conn: &mut DbConn) -> Option<Self> {
+        db_run! {conn: {
+            users_organizations::table
+            .filter(
+                users_organizations::external_id.eq(ext_id)
+                .and(users_organizations::org_uuid.eq(org_uuid))
+            )
+            .first::<UserOrganizationDb>(conn).ok().from_db()
+        }}
+    }
+}
+
+impl OrganizationApiKey {
+    pub async fn save(&self, conn: &DbConn) -> EmptyResult {
+        db_run! { conn:
+            sqlite, mysql {
+                match diesel::replace_into(organization_api_key::table)
+                    .values(OrganizationApiKeyDb::to_db(self))
+                    .execute(conn)
+                {
+                    Ok(_) => Ok(()),
+                    // Record already exists and causes a Foreign Key Violation because replace_into() wants to delete the record first.
+                    Err(diesel::result::Error::DatabaseError(diesel::result::DatabaseErrorKind::ForeignKeyViolation, _)) => {
+                        diesel::update(organization_api_key::table)
+                            .filter(organization_api_key::uuid.eq(&self.uuid))
+                            .set(OrganizationApiKeyDb::to_db(self))
+                            .execute(conn)
+                            .map_res("Error saving organization")
+                    }
+                    Err(e) => Err(e.into()),
+                }.map_res("Error saving organization")
+
+            }
+            postgresql {
+                let value = OrganizationApiKeyDb::to_db(self);
+                diesel::insert_into(organization_api_key::table)
+                    .values(&value)
+                    .on_conflict((organization_api_key::uuid, organization_api_key::org_uuid))
+                    .do_update()
+                    .set(&value)
+                    .execute(conn)
+                    .map_res("Error saving organization")
+            }
+        }
+    }
+
+    pub async fn find_by_org_uuid(org_uuid: &str, conn: &DbConn) -> Option<Self> {
+        db_run! { conn: {
+            organization_api_key::table
+                .filter(organization_api_key::org_uuid.eq(org_uuid))
+                .first::<OrganizationApiKeyDb>(conn)
+                .ok().from_db()
         }}
     }
 }

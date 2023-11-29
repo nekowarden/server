@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::{
     api::{EmptyResult, JsonResult, JsonUpcaseVec},
-    auth::{AdminHeaders, ClientIp, Headers},
+    auth::{AdminHeaders, Headers},
     db::{
         models::{Cipher, Event, UserOrganization},
         DbConn, DbPool,
@@ -32,7 +32,7 @@ struct EventRange {
 
 // Upstream: https://github.com/bitwarden/server/blob/9ecf69d9cabce732cf2c57976dd9afa5728578fb/src/Api/Controllers/EventsController.cs#LL84C35-L84C41
 #[get("/organizations/<org_id>/events?<data..>")]
-async fn get_org_events(org_id: String, data: EventRange, _headers: AdminHeaders, mut conn: DbConn) -> JsonResult {
+async fn get_org_events(org_id: &str, data: EventRange, _headers: AdminHeaders, mut conn: DbConn) -> JsonResult {
     // Return an empty vec when we org events are disabled.
     // This prevents client errors
     let events_json: Vec<Value> = if !CONFIG.org_events_enabled() {
@@ -45,7 +45,7 @@ async fn get_org_events(org_id: String, data: EventRange, _headers: AdminHeaders
             parse_date(&data.end)
         };
 
-        Event::find_by_organization_uuid(&org_id, &start_date, &end_date, &mut conn)
+        Event::find_by_organization_uuid(org_id, &start_date, &end_date, &mut conn)
             .await
             .iter()
             .map(|e| e.to_json())
@@ -60,14 +60,14 @@ async fn get_org_events(org_id: String, data: EventRange, _headers: AdminHeaders
 }
 
 #[get("/ciphers/<cipher_id>/events?<data..>")]
-async fn get_cipher_events(cipher_id: String, data: EventRange, headers: Headers, mut conn: DbConn) -> JsonResult {
+async fn get_cipher_events(cipher_id: &str, data: EventRange, headers: Headers, mut conn: DbConn) -> JsonResult {
     // Return an empty vec when we org events are disabled.
     // This prevents client errors
     let events_json: Vec<Value> = if !CONFIG.org_events_enabled() {
         Vec::with_capacity(0)
     } else {
         let mut events_json = Vec::with_capacity(0);
-        if UserOrganization::user_has_ge_admin_access_to_cipher(&headers.user.uuid, &cipher_id, &mut conn).await {
+        if UserOrganization::user_has_ge_admin_access_to_cipher(&headers.user.uuid, cipher_id, &mut conn).await {
             let start_date = parse_date(&data.start);
             let end_date = if let Some(before_date) = &data.continuation_token {
                 parse_date(before_date)
@@ -75,7 +75,7 @@ async fn get_cipher_events(cipher_id: String, data: EventRange, headers: Headers
                 parse_date(&data.end)
             };
 
-            events_json = Event::find_by_cipher_uuid(&cipher_id, &start_date, &end_date, &mut conn)
+            events_json = Event::find_by_cipher_uuid(cipher_id, &start_date, &end_date, &mut conn)
                 .await
                 .iter()
                 .map(|e| e.to_json())
@@ -93,8 +93,8 @@ async fn get_cipher_events(cipher_id: String, data: EventRange, headers: Headers
 
 #[get("/organizations/<org_id>/users/<user_org_id>/events?<data..>")]
 async fn get_user_events(
-    org_id: String,
-    user_org_id: String,
+    org_id: &str,
+    user_org_id: &str,
     data: EventRange,
     _headers: AdminHeaders,
     mut conn: DbConn,
@@ -111,7 +111,7 @@ async fn get_user_events(
             parse_date(&data.end)
         };
 
-        Event::find_by_org_and_user_org(&org_id, &user_org_id, &start_date, &end_date, &mut conn)
+        Event::find_by_org_and_user_org(org_id, user_org_id, &start_date, &end_date, &mut conn)
             .await
             .iter()
             .map(|e| e.to_json())
@@ -161,12 +161,7 @@ struct EventCollection {
 // https://github.com/bitwarden/server/blob/8a22c0479e987e756ce7412c48a732f9002f0a2d/src/Events/Controllers/CollectController.cs
 // https://github.com/bitwarden/server/blob/8a22c0479e987e756ce7412c48a732f9002f0a2d/src/Core/Services/Implementations/EventService.cs
 #[post("/collect", format = "application/json", data = "<data>")]
-async fn post_events_collect(
-    data: JsonUpcaseVec<EventCollection>,
-    headers: Headers,
-    mut conn: DbConn,
-    ip: ClientIp,
-) -> EmptyResult {
+async fn post_events_collect(data: JsonUpcaseVec<EventCollection>, headers: Headers, mut conn: DbConn) -> EmptyResult {
     if !CONFIG.org_events_enabled() {
         return Ok(());
     }
@@ -180,7 +175,7 @@ async fn post_events_collect(
                     &headers.user.uuid,
                     headers.device.atype,
                     Some(event_date),
-                    &ip.ip,
+                    &headers.ip.ip,
                     &mut conn,
                 )
                 .await;
@@ -190,11 +185,11 @@ async fn post_events_collect(
                     _log_event(
                         event.Type,
                         org_uuid,
-                        String::from(org_uuid),
+                        org_uuid,
                         &headers.user.uuid,
                         headers.device.atype,
                         Some(event_date),
-                        &ip.ip,
+                        &headers.ip.ip,
                         &mut conn,
                     )
                     .await;
@@ -207,11 +202,11 @@ async fn post_events_collect(
                             _log_event(
                                 event.Type,
                                 cipher_uuid,
-                                org_uuid,
+                                &org_uuid,
                                 &headers.user.uuid,
                                 headers.device.atype,
                                 Some(event_date),
-                                &ip.ip,
+                                &headers.ip.ip,
                                 &mut conn,
                             )
                             .await;
@@ -267,7 +262,7 @@ async fn _log_user_event(
 pub async fn log_event(
     event_type: i32,
     source_uuid: &str,
-    org_uuid: String,
+    org_uuid: &str,
     act_user_uuid: String,
     device_type: i32,
     ip: &IpAddr,
@@ -283,7 +278,7 @@ pub async fn log_event(
 async fn _log_event(
     event_type: i32,
     source_uuid: &str,
-    org_uuid: String,
+    org_uuid: &str,
     act_user_uuid: &str,
     device_type: i32,
     event_date: Option<NaiveDateTime>,
@@ -319,7 +314,7 @@ async fn _log_event(
         _ => {}
     }
 
-    event.org_uuid = Some(org_uuid);
+    event.org_uuid = Some(String::from(org_uuid));
     event.act_user_uuid = Some(String::from(act_user_uuid));
     event.device_type = Some(device_type);
     event.ip_address = Some(ip.to_string());

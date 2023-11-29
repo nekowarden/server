@@ -1,6 +1,8 @@
 "use strict";
+/* eslint-env es2017, browser, jquery */
+/* global _post:readable, BASE_URL:readable, reload:readable, jdenticon:readable */
 
-function deleteOrganization() {
+function deleteOrganization(event) {
     event.preventDefault();
     event.stopPropagation();
     const org_uuid = event.target.dataset.vwOrgUuid;
@@ -28,9 +30,22 @@ function deleteOrganization() {
     }
 }
 
+function initActions() {
+    document.querySelectorAll("button[vw-delete-organization]").forEach(btn => {
+        btn.addEventListener("click", deleteOrganization);
+    });
+
+    if (jdenticon) {
+        jdenticon();
+    }
+}
+
 // onLoad events
 document.addEventListener("DOMContentLoaded", (/*event*/) => {
     jQuery("#orgs-table").DataTable({
+        "drawCallback": function() {
+            initActions();
+        },
         "stateSave": true,
         "responsive": true,
         "lengthMenu": [
@@ -39,16 +54,17 @@ document.addEventListener("DOMContentLoaded", (/*event*/) => {
         ],
         "pageLength": -1, // Default show all
         "columnDefs": [{
-            "targets": 4,
+            "targets": [4,5],
             "searchable": false,
             "orderable": false
         }]
     });
 
     // Add click events for organization actions
-    document.querySelectorAll("button[vw-delete-organization]").forEach(btn => {
-        btn.addEventListener("click", deleteOrganization);
-    });
+    initActions();
 
-    document.getElementById("reload").addEventListener("click", reload);
+    const btnReload = document.getElementById("reload");
+    if (btnReload) {
+        btnReload.addEventListener("click", reload);
+    }
 });

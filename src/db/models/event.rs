@@ -87,9 +87,9 @@ pub enum EventType {
     OrganizationUserRemoved = 1503,
     OrganizationUserUpdatedGroups = 1504,
     // OrganizationUserUnlinkedSso = 1505, // Not supported
-    // OrganizationUserResetPasswordEnroll = 1506, // Not supported
-    // OrganizationUserResetPasswordWithdraw = 1507, // Not supported
-    // OrganizationUserAdminResetPassword = 1508, // Not supported
+    OrganizationUserResetPasswordEnroll = 1506,
+    OrganizationUserResetPasswordWithdraw = 1507,
+    OrganizationUserAdminResetPassword = 1508,
     // OrganizationUserResetSsoLink = 1509, // Not supported
     // OrganizationUserFirstSsoLogin = 1510, // Not supported
     OrganizationUserRevoked = 1511,
@@ -260,6 +260,17 @@ impl Event {
                 .load::<EventDb>(conn)
                 .expect("Error filtering events")
                 .from_db()
+        }}
+    }
+
+    pub async fn count_by_org(org_uuid: &str, conn: &mut DbConn) -> i64 {
+        db_run! { conn: {
+            event::table
+                .filter(event::org_uuid.eq(org_uuid))
+                .count()
+                .first::<i64>(conn)
+                .ok()
+                .unwrap_or(0)
         }}
     }
 

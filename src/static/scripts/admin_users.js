@@ -1,6 +1,8 @@
 "use strict";
+/* eslint-env es2017, browser, jquery */
+/* global _post:readable, BASE_URL:readable, reload:readable, jdenticon:readable */
 
-function deleteUser() {
+function deleteUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -22,35 +24,43 @@ function deleteUser() {
     }
 }
 
-function remove2fa() {
+function remove2fa(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
-    if (!id) {
+    const email = event.target.parentNode.dataset.vwUserEmail;
+    if (!id || !email) {
         alert("Required parameters not found!");
         return false;
     }
-    _post(`${BASE_URL}/admin/users/${id}/remove-2fa`,
-        "2FA removed correctly",
-        "Error removing 2FA"
-    );
+    const confirmed = confirm(`Are you sure you want to remove 2FA for "${email}"?`);
+    if (confirmed) {
+        _post(`${BASE_URL}/admin/users/${id}/remove-2fa`,
+            "2FA removed correctly",
+            "Error removing 2FA"
+        );
+    }
 }
 
-function deauthUser() {
+function deauthUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
-    if (!id) {
+    const email = event.target.parentNode.dataset.vwUserEmail;
+    if (!id || !email) {
         alert("Required parameters not found!");
         return false;
     }
-    _post(`${BASE_URL}/admin/users/${id}/deauth`,
-        "Sessions deauthorized correctly",
-        "Error deauthorizing sessions"
-    );
+    const confirmed = confirm(`Are you sure you want to deauthorize sessions for "${email}"?`);
+    if (confirmed) {
+        _post(`${BASE_URL}/admin/users/${id}/deauth`,
+            "Sessions deauthorized correctly",
+            "Error deauthorizing sessions"
+        );
+    }
 }
 
-function disableUser() {
+function disableUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -68,7 +78,7 @@ function disableUser() {
     }
 }
 
-function enableUser() {
+function enableUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const id = event.target.parentNode.dataset.vwUserUuid;
@@ -86,7 +96,7 @@ function enableUser() {
     }
 }
 
-function updateRevisions() {
+function updateRevisions(event) {
     event.preventDefault();
     event.stopPropagation();
     _post(`${BASE_URL}/admin/users/update_revision`,
@@ -95,7 +105,7 @@ function updateRevisions() {
     );
 }
 
-function inviteUser() {
+function inviteUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const email = document.getElementById("inviteEmail");
@@ -103,29 +113,48 @@ function inviteUser() {
         "email": email.value
     });
     email.value = "";
-    _post(`${BASE_URL}/admin/invite/`,
+    _post(`${BASE_URL}/admin/invite`,
         "User invited correctly",
         "Error inviting user",
         data
     );
 }
 
+function resendUserInvite (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = event.target.parentNode.dataset.vwUserUuid;
+    const email = event.target.parentNode.dataset.vwUserEmail;
+    if (!id || !email) {
+        alert("Required parameters not found!");
+        return false;
+    }
+    const confirmed = confirm(`Are you sure you want to resend invitation for "${email}"?`);
+    if (confirmed) {
+        _post(`${BASE_URL}/admin/users/${id}/invite/resend`,
+            "Invite sent successfully",
+            "Error resend invite"
+        );
+    }
+}
+
 const ORG_TYPES = {
     "0": {
         "name": "Owner",
-        "color": "orange"
+        "bg": "orange",
+        "font": "black"
     },
     "1": {
         "name": "Admin",
-        "color": "blueviolet"
+        "bg": "blueviolet"
     },
     "2": {
         "name": "User",
-        "color": "blue"
+        "bg": "blue"
     },
     "3": {
         "name": "Manager",
-        "color": "green"
+        "bg": "green"
     },
 };
 
@@ -182,7 +211,7 @@ userOrgTypeDialog.addEventListener("hide.bs.modal", function() {
     document.getElementById("userOrgTypeOrgUuid").value = "";
 }, false);
 
-function updateUserOrgType() {
+function updateUserOrgType(event) {
     event.preventDefault();
     event.stopPropagation();
 
@@ -195,34 +224,17 @@ function updateUserOrgType() {
     );
 }
 
-// onLoad events
-document.addEventListener("DOMContentLoaded", (/*event*/) => {
-    jQuery("#users-table").DataTable({
-        "stateSave": true,
-        "responsive": true,
-        "lengthMenu": [
-            [-1, 5, 10, 25, 50],
-            ["All", 5, 10, 25, 50]
-        ],
-        "pageLength": -1, // Default show all
-        "columnDefs": [{
-            "targets": [1, 2],
-            "type": "date-iso"
-        }, {
-            "targets": 6,
-            "searchable": false,
-            "orderable": false
-        }]
-    });
-
+function initUserTable() {
     // Color all the org buttons per type
     document.querySelectorAll("button[data-vw-org-type]").forEach(function(e) {
         const orgType = ORG_TYPES[e.dataset.vwOrgType];
-        e.style.backgroundColor = orgType.color;
+        e.style.backgroundColor = orgType.bg;
+        if (orgType.font !== undefined) {
+            e.style.color = orgType.font;
+        }
         e.title = orgType.name;
     });
 
-    // Add click events for user actions
     document.querySelectorAll("button[vw-remove2fa]").forEach(btn => {
         btn.addEventListener("click", remove2fa);
     });
@@ -238,9 +250,55 @@ document.addEventListener("DOMContentLoaded", (/*event*/) => {
     document.querySelectorAll("button[vw-enable-user]").forEach(btn => {
         btn.addEventListener("click", enableUser);
     });
+    document.querySelectorAll("button[vw-resend-user-invite]").forEach(btn => {
+        btn.addEventListener("click", resendUserInvite);
+    });
 
-    document.getElementById("updateRevisions").addEventListener("click", updateRevisions);
-    document.getElementById("reload").addEventListener("click", reload);
-    document.getElementById("userOrgTypeForm").addEventListener("submit", updateUserOrgType);
-    document.getElementById("inviteUserForm").addEventListener("submit", inviteUser);
+    if (jdenticon) {
+        jdenticon();
+    }
+}
+
+// onLoad events
+document.addEventListener("DOMContentLoaded", (/*event*/) => {
+    jQuery("#users-table").DataTable({
+        "drawCallback": function() {
+            initUserTable();
+        },
+        "stateSave": true,
+        "responsive": true,
+        "lengthMenu": [
+            [-1, 2, 5, 10, 25, 50],
+            ["All", 2, 5, 10, 25, 50]
+        ],
+        "pageLength": -1, // Default show all
+        "columnDefs": [{
+            "targets": [1, 2],
+            "type": "date-iso"
+        }, {
+            "targets": 6,
+            "searchable": false,
+            "orderable": false
+        }]
+    });
+
+    // Add click events for user actions
+    initUserTable();
+
+    const btnUpdateRevisions = document.getElementById("updateRevisions");
+    if (btnUpdateRevisions) {
+        btnUpdateRevisions.addEventListener("click", updateRevisions);
+    }
+    const btnReload = document.getElementById("reload");
+    if (btnReload) {
+        btnReload.addEventListener("click", reload);
+    }
+    const btnUserOrgTypeForm = document.getElementById("userOrgTypeForm");
+    if (btnUserOrgTypeForm) {
+        btnUserOrgTypeForm.addEventListener("submit", updateUserOrgType);
+    }
+    const btnInviteUserForm = document.getElementById("inviteUserForm");
+    if (btnInviteUserForm) {
+        btnInviteUserForm.addEventListener("submit", inviteUser);
+    }
 });

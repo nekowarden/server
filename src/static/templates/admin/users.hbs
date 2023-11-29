@@ -1,14 +1,14 @@
 <main class="container-xl">
-    <div id="users-block" class="my-3 p-3 bg-white rounded shadow">
+    <div id="users-block" class="my-3 p-3 rounded shadow">
         <h6 class="border-bottom pb-2 mb-3">Registered Users</h6>
         <div class="table-responsive-xl small">
             <table id="users-table" class="table table-sm table-striped table-hover">
                 <thead>
                     <tr>
-                        <th>User</th>
+                        <th class="vw-account-details">User</th>
                         <th class="vw-created-at">Created at</th>
                         <th class="vw-last-active">Last Active</th>
-                        <th class="vw-items">Items</th>
+                        <th class="vw-entries">Entries</th>
                         <th class="vw-attachments">Attachments</th>
                         <th class="vw-organizations">Organizations</th>
                         <th class="vw-actions">Actions</th>
@@ -30,7 +30,7 @@
                                         <span class="badge bg-success me-2" title="2FA is enabled">2FA</span>
                                     {{/if}}
                                     {{#case _Status 1}}
-                                        <span class="badge bg-warning me-2" title="User is invited">Invited</span>
+                                        <span class="badge bg-warning text-dark me-2" title="User is invited">Invited</span>
                                     {{/case}}
                                     {{#if EmailVerified}}
                                         <span class="badge bg-success me-2" title="Email has been verified">Verified</span>
@@ -63,15 +63,18 @@
                         <td class="text-end px-0 small">
                             <span data-vw-user-uuid="{{jsesc Id no_quote}}" data-vw-user-email="{{jsesc Email no_quote}}">
                                 {{#if TwoFactorEnabled}}
-                                <button type="button" class="btn btn-sm btn-link p-0 border-0" vw-remove2fa>Remove all 2FA</button>
+                                <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-remove2fa>Remove all 2FA</button><br>
                                 {{/if}}
-                                <button type="button" class="btn btn-sm btn-link p-0 border-0" vw-deauth-user>Deauthorize sessions</button>
-                                <button type="button" class="btn btn-sm btn-link p-0 border-0" vw-delete-user>Delete User</button>
+                                <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-deauth-user>Deauthorize sessions</button><br>
+                                <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-delete-user>Delete User</button><br>
                                 {{#if user_enabled}}
-                                <button type="button" class="btn btn-sm btn-link p-0 border-0" vw-disable-user>Disable User</button>
+                                <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-disable-user>Disable User</button><br>
                                 {{else}}
-                                <button type="button" class="btn btn-sm btn-link p-0 border-0" vw-enable-user>Enable User</button>
+                                <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-enable-user>Enable User</button><br>
                                 {{/if}}
+                                {{#case _Status 1}}
+                                <button type="button" class="btn btn-sm btn-link p-0 border-0 float-right" vw-resend-user-invite>Resend invite</button><br>
+                                {{/case}}
                             </span>
                         </td>
                     </tr>
@@ -96,7 +99,7 @@
             <small>Email:</small>
 
             <form class="form-inline input-group w-50" id="inviteUserForm">
-                <input type="email" class="form-control me-2" id="inviteEmail" placeholder="Enter email" required>
+                <input type="email" class="form-control me-2" id="inviteEmail" placeholder="Enter email" required spellcheck="false">
                 <button type="submit" class="btn btn-primary">Invite</button>
             </form>
         </div>
@@ -137,7 +140,7 @@
 </main>
 
 <link rel="stylesheet" href="{{urlpath}}/vw_static/datatables.css" />
-<script src="{{urlpath}}/vw_static/jquery-3.6.2.slim.js"></script>
+<script src="{{urlpath}}/vw_static/jquery-3.7.0.slim.js"></script>
 <script src="{{urlpath}}/vw_static/datatables.js"></script>
 <script src="{{urlpath}}/vw_static/admin_users.js"></script>
 <script src="{{urlpath}}/vw_static/jdenticon.js"></script>

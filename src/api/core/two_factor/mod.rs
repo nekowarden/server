@@ -5,8 +5,8 @@ use rocket::Route;
 use serde_json::Value;
 
 use crate::{
-    api::{core::log_user_event, JsonResult, JsonUpcase, NumberOrString, PasswordData},
-    auth::{ClientHeaders, ClientIp, Headers},
+    api::{core::log_user_event, JsonResult, JsonUpcase, NumberOrString, PasswordOrOtpData},
+    auth::{ClientHeaders, Headers},
     crypto,
     db::{models::*, DbConn, DbPool},
     mail, CONFIG,
@@ -15,6 +15,7 @@ use crate::{
 pub mod authenticator;
 pub mod duo;
 pub mod email;
+pub mod protected_actions;
 pub mod webauthn;
 pub mod yubikey;
 
@@ -33,6 +34,7 @@ pub fn routes() -> Vec<Route> {
     routes.append(&mut email::routes());
     routes.append(&mut webauthn::routes());
     routes.append(&mut yubikey::routes());
+    routes.append(&mut protected_actions::routes());
 
     routes
 }
@@ -50,13 +52,11 @@ async fn get_twofactor(headers: Headers, mut conn: DbConn) -> Json<Value> {
 }
 
 #[post("/two-factor/get-recover", data = "<data>")]
-fn get_recover(data: JsonUpcase<PasswordData>, headers: Headers) -> JsonResult {
-    let data: PasswordData = data.into_inner().data;
+async fn get_recover(data: JsonUpcase<PasswordOrOtpData>, headers: Headers, mut conn: DbConn) -> JsonResult {
+    let data: PasswordOrOtpData = data.into_inner().data;
     let user = headers.user;
 
-    if !user.check_valid_password(&data.MasterPasswordHash) {
-        err!("Invalid password");
-    }
+    data.validate(&user, true, &mut conn).await?;
 
     Ok(Json(json!({
         "Code": user.totp_recover,
@@ -73,12 +73,7 @@ struct RecoverTwoFactor {
 }
 
 #[post("/two-factor/recover", data = "<data>")]
-async fn recover(
-    data: JsonUpcase<RecoverTwoFactor>,
-    client_headers: ClientHeaders,
-    mut conn: DbConn,
-    ip: ClientIp,
-) -> JsonResult {
+async fn recover(data: JsonUpcase<RecoverTwoFactor>, client_headers: ClientHeaders, mut conn: DbConn) -> JsonResult {
     let data: RecoverTwoFactor = data.into_inner().data;
 
     use crate::db::models::User;
@@ -102,12 +97,19 @@ async fn recover(
     // Remove all twofactors from the user
     TwoFactor::delete_all_by_user(&user.uuid, &mut conn).await?;
 
-    log_user_event(EventType::UserRecovered2fa as i32, &user.uuid, client_headers.device_type, &ip.ip, &mut conn).await;
+    log_user_event(
+        EventType::UserRecovered2fa as i32,
+        &user.uuid,
+        client_headers.device_type,
+        &client_headers.ip.ip,
+        &mut conn,
+    )
+    .await;
 
     // Remove the recovery code, not needed without twofactors
     user.totp_recover = None;
     user.save(&mut conn).await?;
-    Ok(Json(json!({})))
+    Ok(Json(Value::Object(serde_json::Map::new())))
 }
 
 async fn _generate_recover_code(user: &mut User, conn: &mut DbConn) {
@@ -121,30 +123,30 @@ async fn _generate_recover_code(user: &mut User, conn: &mut DbConn) {
 #[derive(Deserialize)]
 #[allow(non_snake_case)]
 struct DisableTwoFactorData {
-    MasterPasswordHash: String,
+    MasterPasswordHash: Option<String>,
+    Otp: Option<String>,
     Type: NumberOrString,
 }
 
 #[post("/two-factor/disable", data = "<data>")]
-async fn disable_twofactor(
-    data: JsonUpcase<DisableTwoFactorData>,
-    headers: Headers,
-    mut conn: DbConn,
-    ip: ClientIp,
-) -> JsonResult {
+async fn disable_twofactor(data: JsonUpcase<DisableTwoFactorData>, headers: Headers, mut conn: DbConn) -> JsonResult {
     let data: DisableTwoFactorData = data.into_inner().data;
-    let password_hash = data.MasterPasswordHash;
     let user = headers.user;
 
-    if !user.check_valid_password(&password_hash) {
-        err!("Invalid password");
+    // Delete directly after a valid token has been provided
+    PasswordOrOtpData {
+        MasterPasswordHash: data.MasterPasswordHash,
+        Otp: data.Otp,
     }
+    .validate(&user, true, &mut conn)
+    .await?;
 
     let type_ = data.Type.into_i32()?;
 
     if let Some(twofactor) = TwoFactor::find_by_user_and_type(&user.uuid, type_, &mut conn).await {
         twofactor.delete(&mut conn).await?;
-        log_user_event(EventType::UserDisabled2fa as i32, &user.uuid, headers.device.atype, &ip.ip, &mut conn).await;
+        log_user_event(EventType::UserDisabled2fa as i32, &user.uuid, headers.device.atype, &headers.ip.ip, &mut conn)
+            .await;
     }
 
     let twofactor_disabled = TwoFactor::find_by_user(&user.uuid, &mut conn).await.is_empty();
@@ -173,13 +175,8 @@ async fn disable_twofactor(
 }
 
 #[put("/two-factor/disable", data = "<data>")]
-async fn disable_twofactor_put(
-    data: JsonUpcase<DisableTwoFactorData>,
-    headers: Headers,
-    conn: DbConn,
-    ip: ClientIp,
-) -> JsonResult {
-    disable_twofactor(data, headers, conn, ip).await
+async fn disable_twofactor_put(data: JsonUpcase<DisableTwoFactorData>, headers: Headers, conn: DbConn) -> JsonResult {
+    disable_twofactor(data, headers, conn).await
 }
 
 pub async fn send_incomplete_2fa_notifications(pool: DbPool) {

@@ -6,9 +6,9 @@ use rocket::Route;
 use crate::{
     api::{
         core::log_user_event, core::two_factor::_generate_recover_code, ApiResult, EmptyResult, JsonResult, JsonUpcase,
-        PasswordData,
+        PasswordOrOtpData,
     },
-    auth::{ClientIp, Headers},
+    auth::Headers,
     crypto,
     db::{
         models::{EventType, TwoFactor, TwoFactorType, User},
@@ -92,14 +92,13 @@ impl DuoStatus {
 const DISABLED_MESSAGE_DEFAULT: &str = "<To use the global Duo keys, please leave these fields untouched>";
 
 #[post("/two-factor/get-duo", data = "<data>")]
-async fn get_duo(data: JsonUpcase<PasswordData>, headers: Headers, mut conn: DbConn) -> JsonResult {
-    let data: PasswordData = data.into_inner().data;
+async fn get_duo(data: JsonUpcase<PasswordOrOtpData>, headers: Headers, mut conn: DbConn) -> JsonResult {
+    let data: PasswordOrOtpData = data.into_inner().data;
+    let user = headers.user;
 
-    if !headers.user.check_valid_password(&data.MasterPasswordHash) {
-        err!("Invalid password");
-    }
+    data.validate(&user, false, &mut conn).await?;
 
-    let data = get_user_duo_data(&headers.user.uuid, &mut conn).await;
+    let data = get_user_duo_data(&user.uuid, &mut conn).await;
 
     let (enabled, data) = match data {
         DuoStatus::Global(_) => (true, Some(DuoData::secret())),
@@ -129,10 +128,11 @@ async fn get_duo(data: JsonUpcase<PasswordData>, headers: Headers, mut conn: DbC
 #[derive(Deserialize)]
 #[allow(non_snake_case, dead_code)]
 struct EnableDuoData {
-    MasterPasswordHash: String,
     Host: String,
     SecretKey: String,
     IntegrationKey: String,
+    MasterPasswordHash: Option<String>,
+    Otp: Option<String>,
 }
 
 impl From<EnableDuoData> for DuoData {
@@ -155,13 +155,16 @@ fn check_duo_fields_custom(data: &EnableDuoData) -> bool {
 }
 
 #[post("/two-factor/duo", data = "<data>")]
-async fn activate_duo(data: JsonUpcase<EnableDuoData>, headers: Headers, mut conn: DbConn, ip: ClientIp) -> JsonResult {
+async fn activate_duo(data: JsonUpcase<EnableDuoData>, headers: Headers, mut conn: DbConn) -> JsonResult {
     let data: EnableDuoData = data.into_inner().data;
     let mut user = headers.user;
 
-    if !user.check_valid_password(&data.MasterPasswordHash) {
-        err!("Invalid password");
+    PasswordOrOtpData {
+        MasterPasswordHash: data.MasterPasswordHash.clone(),
+        Otp: data.Otp.clone(),
     }
+    .validate(&user, true, &mut conn)
+    .await?;
 
     let (data, data_str) = if check_duo_fields_custom(&data) {
         let data_req: DuoData = data.into();
@@ -178,7 +181,7 @@ async fn activate_duo(data: JsonUpcase<EnableDuoData>, headers: Headers, mut con
 
     _generate_recover_code(&mut user, &mut conn).await;
 
-    log_user_event(EventType::UserUpdated2fa as i32, &user.uuid, headers.device.atype, &ip.ip, &mut conn).await;
+    log_user_event(EventType::UserUpdated2fa as i32, &user.uuid, headers.device.atype, &headers.ip.ip, &mut conn).await;
 
     Ok(Json(json!({
         "Enabled": true,
@@ -190,8 +193,8 @@ async fn activate_duo(data: JsonUpcase<EnableDuoData>, headers: Headers, mut con
 }
 
 #[put("/two-factor/duo", data = "<data>")]
-async fn activate_duo_put(data: JsonUpcase<EnableDuoData>, headers: Headers, conn: DbConn, ip: ClientIp) -> JsonResult {
-    activate_duo(data, headers, conn, ip).await
+async fn activate_duo_put(data: JsonUpcase<EnableDuoData>, headers: Headers, conn: DbConn) -> JsonResult {
+    activate_duo(data, headers, conn).await
 }
 
 async fn duo_api_request(method: &str, path: &str, params: &str, data: &DuoData) -> EmptyResult {

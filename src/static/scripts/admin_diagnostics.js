@@ -1,7 +1,10 @@
 "use strict";
+/* eslint-env es2017, browser */
+/* global BASE_URL:readable, bootstrap:readable */
 
 var dnsCheck = false;
 var timeCheck = false;
+var ntpTimeCheck = false;
 var domainCheck = false;
 var httpsCheck = false;
 
@@ -65,7 +68,7 @@ function checkVersions(platform, installed, latest, commit=null) {
 
 // ================================
 // Generate support string to be pasted on github or the forum
-async function generateSupportString(dj) {
+async function generateSupportString(event, dj) {
     event.preventDefault();
     event.stopPropagation();
 
@@ -88,7 +91,8 @@ async function generateSupportString(dj) {
     supportString += `* Internet access: ${dj.has_http_access}\n`;
     supportString += `* Internet access via a proxy: ${dj.uses_proxy}\n`;
     supportString += `* DNS Check: ${dnsCheck}\n`;
-    supportString += `* Time Check: ${timeCheck}\n`;
+    supportString += `* Browser/Server Time Check: ${timeCheck}\n`;
+    supportString += `* Server/NTP Time Check: ${ntpTimeCheck}\n`;
     supportString += `* Domain Configuration Check: ${domainCheck}\n`;
     supportString += `* HTTPS Check: ${httpsCheck}\n`;
     supportString += `* Database type: ${dj.db_type}\n`;
@@ -114,7 +118,7 @@ async function generateSupportString(dj) {
     document.getElementById("copy-support").classList.remove("d-none");
 }
 
-function copyToClipboard() {
+function copyToClipboard(event) {
     event.preventDefault();
     event.stopPropagation();
 
@@ -131,19 +135,20 @@ function copyToClipboard() {
     document.execCommand("copy");
     tmpCopyEl.remove();
 
-    new BSN.Toast("#toastClipboardCopy").show();
+    new bootstrap.Toast("#toastClipboardCopy").show();
 }
 
-function checkTimeDrift(browserUTC, serverUTC) {
+function checkTimeDrift(utcTimeA, utcTimeB, statusPrefix) {
     const timeDrift = (
-        Date.parse(serverUTC.replace(" ", "T").replace(" UTC", "")) -
-        Date.parse(browserUTC.replace(" ", "T").replace(" UTC", ""))
+        Date.parse(utcTimeA.replace(" ", "T").replace(" UTC", "")) -
+        Date.parse(utcTimeB.replace(" ", "T").replace(" UTC", ""))
     ) / 1000;
-    if (timeDrift > 20 || timeDrift < -20) {
-        document.getElementById("time-warning").classList.remove("d-none");
+    if (timeDrift > 15 || timeDrift < -15) {
+        document.getElementById(`${statusPrefix}-warning`).classList.remove("d-none");
+        return false;
     } else {
-        document.getElementById("time-success").classList.remove("d-none");
-        timeCheck = true;
+        document.getElementById(`${statusPrefix}-success`).classList.remove("d-none");
+        return true;
     }
 }
 
@@ -193,7 +198,18 @@ function checkDns(dns_resolved) {
 function init(dj) {
     // Time check
     document.getElementById("time-browser-string").innerText = browserUTC;
-    checkTimeDrift(browserUTC, dj.server_time);
+
+    // Check if we were able to fetch a valid NTP Time
+    // If so, compare both browser and server with NTP
+    // Else, compare browser and server.
+    if (dj.ntp_time.indexOf("UTC") !== -1) {
+        timeCheck = checkTimeDrift(dj.server_time, browserUTC, "time");
+        checkTimeDrift(dj.ntp_time, browserUTC, "ntp-browser");
+        ntpTimeCheck = checkTimeDrift(dj.ntp_time, dj.server_time, "ntp-server");
+    } else {
+        timeCheck = checkTimeDrift(dj.server_time, browserUTC, "time");
+        ntpTimeCheck = "n/a";
+    }
 
     // Domain check
     const browserURL = location.href.toLowerCase();
@@ -208,12 +224,18 @@ function init(dj) {
 }
 
 // onLoad events
-document.addEventListener("DOMContentLoaded", (/*event*/) => {
+document.addEventListener("DOMContentLoaded", (event) => {
     const diag_json = JSON.parse(document.getElementById("diagnostics_json").innerText);
     init(diag_json);
 
-    document.getElementById("gen-support").addEventListener("click", () => {
-        generateSupportString(diag_json);
-    });
-    document.getElementById("copy-support").addEventListener("click", copyToClipboard);
+    const btnGenSupport = document.getElementById("gen-support");
+    if (btnGenSupport) {
+        btnGenSupport.addEventListener("click", () => {
+            generateSupportString(event, diag_json);
+        });
+    }
+    const btnCopySupport = document.getElementById("copy-support");
+    if (btnCopySupport) {
+        btnCopySupport.addEventListener("click", copyToClipboard);
+    }
 });

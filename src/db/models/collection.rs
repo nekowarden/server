@@ -10,6 +10,7 @@ db_object! {
         pub uuid: String,
         pub org_uuid: String,
         pub name: String,
+        pub external_id: Option<String>,
     }
 
     #[derive(Identifiable, Queryable, Insertable)]
@@ -33,23 +34,41 @@ db_object! {
 
 /// Local methods
 impl Collection {
-    pub fn new(org_uuid: String, name: String) -> Self {
-        Self {
+    pub fn new(org_uuid: String, name: String, external_id: Option<String>) -> Self {
+        let mut new_model = Self {
             uuid: crate::util::get_uuid(),
-
             org_uuid,
             name,
-        }
+            external_id: None,
+        };
+
+        new_model.set_external_id(external_id);
+        new_model
     }
 
     pub fn to_json(&self) -> Value {
         json!({
-            "ExternalId": null, // Not support by us
+            "ExternalId": self.external_id,
             "Id": self.uuid,
             "OrganizationId": self.org_uuid,
             "Name": self.name,
             "Object": "collection",
         })
+    }
+
+    pub fn set_external_id(&mut self, external_id: Option<String>) {
+        //Check if external id is empty. We don't want to have
+        //empty strings in the database
+        match external_id {
+            Some(external_id) => {
+                if external_id.is_empty() {
+                    self.external_id = None;
+                } else {
+                    self.external_id = Some(external_id)
+                }
+            }
+            None => self.external_id = None,
+        }
     }
 
     pub async fn to_json_details(
@@ -64,6 +83,8 @@ impl Collection {
                 Some(_) => {
                     if let Some(uc) = cipher_sync_data.user_collections.get(&self.uuid) {
                         (uc.read_only, uc.hide_passwords)
+                    } else if let Some(cg) = cipher_sync_data.user_collections_groups.get(&self.uuid) {
+                        (cg.read_only, cg.hide_passwords)
                     } else {
                         (false, false)
                     }
@@ -232,6 +253,17 @@ impl Collection {
         }}
     }
 
+    pub async fn count_by_org(org_uuid: &str, conn: &mut DbConn) -> i64 {
+        db_run! { conn: {
+            collections::table
+                .filter(collections::org_uuid.eq(org_uuid))
+                .count()
+                .first::<i64>(conn)
+                .ok()
+                .unwrap_or(0)
+        }}
+    }
+
     pub async fn find_by_uuid_and_org(uuid: &str, org_uuid: &str, conn: &mut DbConn) -> Option<Self> {
         db_run! { conn: {
             collections::table
@@ -287,47 +319,95 @@ impl Collection {
     }
 
     pub async fn is_writable_by_user(&self, user_uuid: &str, conn: &mut DbConn) -> bool {
-        match UserOrganization::find_by_user_and_org(user_uuid, &self.org_uuid, conn).await {
-            None => false, // Not in Org
-            Some(user_org) => {
-                if user_org.has_full_access() {
-                    return true;
-                }
-
-                db_run! { conn: {
-                    users_collections::table
-                        .filter(users_collections::collection_uuid.eq(&self.uuid))
-                        .filter(users_collections::user_uuid.eq(user_uuid))
-                        .filter(users_collections::read_only.eq(false))
-                        .count()
-                        .first::<i64>(conn)
-                        .ok()
-                        .unwrap_or(0) != 0
-                }}
-            }
-        }
+        let user_uuid = user_uuid.to_string();
+        db_run! { conn: {
+            collections::table
+            .left_join(users_collections::table.on(
+                users_collections::collection_uuid.eq(collections::uuid).and(
+                    users_collections::user_uuid.eq(user_uuid.clone())
+                )
+            ))
+            .left_join(users_organizations::table.on(
+                collections::org_uuid.eq(users_organizations::org_uuid).and(
+                    users_organizations::user_uuid.eq(user_uuid)
+                )
+            ))
+            .left_join(groups_users::table.on(
+                groups_users::users_organizations_uuid.eq(users_organizations::uuid)
+            ))
+            .left_join(groups::table.on(
+                groups::uuid.eq(groups_users::groups_uuid)
+            ))
+            .left_join(collections_groups::table.on(
+                collections_groups::groups_uuid.eq(groups_users::groups_uuid).and(
+                    collections_groups::collections_uuid.eq(collections::uuid)
+                )
+            ))
+            .filter(collections::uuid.eq(&self.uuid))
+            .filter(
+                users_collections::collection_uuid.eq(&self.uuid).and(users_collections::read_only.eq(false)).or(// Directly accessed collection
+                    users_organizations::access_all.eq(true).or( // access_all in Organization
+                        users_organizations::atype.le(UserOrgType::Admin as i32) // Org admin or owner
+                )).or(
+                    groups::access_all.eq(true) // access_all in groups
+                ).or( // access via groups
+                    groups_users::users_organizations_uuid.eq(users_organizations::uuid).and(
+                        collections_groups::collections_uuid.is_not_null().and(
+                            collections_groups::read_only.eq(false))
+                    )
+                )
+            )
+            .count()
+            .first::<i64>(conn)
+            .ok()
+            .unwrap_or(0) != 0
+        }}
     }
 
     pub async fn hide_passwords_for_user(&self, user_uuid: &str, conn: &mut DbConn) -> bool {
-        match UserOrganization::find_by_user_and_org(user_uuid, &self.org_uuid, conn).await {
-            None => true, // Not in Org
-            Some(user_org) => {
-                if user_org.has_full_access() {
-                    return false;
-                }
-
-                db_run! { conn: {
-                    users_collections::table
-                        .filter(users_collections::collection_uuid.eq(&self.uuid))
-                        .filter(users_collections::user_uuid.eq(user_uuid))
-                        .filter(users_collections::hide_passwords.eq(true))
-                        .count()
-                        .first::<i64>(conn)
-                        .ok()
-                        .unwrap_or(0) != 0
-                }}
-            }
-        }
+        let user_uuid = user_uuid.to_string();
+        db_run! { conn: {
+            collections::table
+            .left_join(users_collections::table.on(
+                users_collections::collection_uuid.eq(collections::uuid).and(
+                    users_collections::user_uuid.eq(user_uuid.clone())
+                )
+            ))
+            .left_join(users_organizations::table.on(
+                collections::org_uuid.eq(users_organizations::org_uuid).and(
+                    users_organizations::user_uuid.eq(user_uuid)
+                )
+            ))
+            .left_join(groups_users::table.on(
+                groups_users::users_organizations_uuid.eq(users_organizations::uuid)
+            ))
+            .left_join(groups::table.on(
+                groups::uuid.eq(groups_users::groups_uuid)
+            ))
+            .left_join(collections_groups::table.on(
+                collections_groups::groups_uuid.eq(groups_users::groups_uuid).and(
+                    collections_groups::collections_uuid.eq(collections::uuid)
+                )
+            ))
+            .filter(collections::uuid.eq(&self.uuid))
+            .filter(
+                users_collections::collection_uuid.eq(&self.uuid).and(users_collections::hide_passwords.eq(true)).or(// Directly accessed collection
+                    users_organizations::access_all.eq(true).or( // access_all in Organization
+                        users_organizations::atype.le(UserOrgType::Admin as i32) // Org admin or owner
+                )).or(
+                    groups::access_all.eq(true) // access_all in groups
+                ).or( // access via groups
+                    groups_users::users_organizations_uuid.eq(users_organizations::uuid).and(
+                        collections_groups::collections_uuid.is_not_null().and(
+                            collections_groups::hide_passwords.eq(true))
+                    )
+                )
+            )
+            .count()
+            .first::<i64>(conn)
+            .ok()
+            .unwrap_or(0) != 0
+        }}
     }
 }
 
@@ -340,6 +420,19 @@ impl CollectionUser {
                 .inner_join(collections::table.on(collections::uuid.eq(users_collections::collection_uuid)))
                 .filter(collections::org_uuid.eq(org_uuid))
                 .select(users_collections::all_columns)
+                .load::<CollectionUserDb>(conn)
+                .expect("Error loading users_collections")
+                .from_db()
+        }}
+    }
+
+    pub async fn find_by_organization(org_uuid: &str, conn: &mut DbConn) -> Vec<Self> {
+        db_run! { conn: {
+            users_collections::table
+                .inner_join(collections::table.on(collections::uuid.eq(users_collections::collection_uuid)))
+                .filter(collections::org_uuid.eq(org_uuid))
+                .inner_join(users_organizations::table.on(users_organizations::user_uuid.eq(users_collections::user_uuid)))
+                .select((users_organizations::uuid, users_collections::collection_uuid, users_collections::read_only, users_collections::hide_passwords))
                 .load::<CollectionUserDb>(conn)
                 .expect("Error loading users_collections")
                 .from_db()
@@ -423,6 +516,21 @@ impl CollectionUser {
             users_collections::table
                 .filter(users_collections::collection_uuid.eq(collection_uuid))
                 .select(users_collections::all_columns)
+                .load::<CollectionUserDb>(conn)
+                .expect("Error loading users_collections")
+                .from_db()
+        }}
+    }
+
+    pub async fn find_by_collection_swap_user_uuid_with_org_user_uuid(
+        collection_uuid: &str,
+        conn: &mut DbConn,
+    ) -> Vec<Self> {
+        db_run! { conn: {
+            users_collections::table
+                .filter(users_collections::collection_uuid.eq(collection_uuid))
+                .inner_join(users_organizations::table.on(users_organizations::user_uuid.eq(users_collections::user_uuid)))
+                .select((users_organizations::uuid, users_collections::collection_uuid, users_collections::read_only, users_collections::hide_passwords))
                 .load::<CollectionUserDb>(conn)
                 .expect("Error loading users_collections")
                 .from_db()

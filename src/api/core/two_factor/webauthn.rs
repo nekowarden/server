@@ -7,9 +7,9 @@ use webauthn_rs::{base64_data::Base64UrlSafeData, proto::*, AuthenticationState,
 use crate::{
     api::{
         core::{log_user_event, two_factor::_generate_recover_code},
-        EmptyResult, JsonResult, JsonUpcase, NumberOrString, PasswordData,
+        EmptyResult, JsonResult, JsonUpcase, NumberOrString, PasswordOrOtpData,
     },
-    auth::{ClientIp, Headers},
+    auth::Headers,
     db::{
         models::{EventType, TwoFactor, TwoFactorType},
         DbConn,
@@ -103,16 +103,17 @@ impl WebauthnRegistration {
 }
 
 #[post("/two-factor/get-webauthn", data = "<data>")]
-async fn get_webauthn(data: JsonUpcase<PasswordData>, headers: Headers, mut conn: DbConn) -> JsonResult {
+async fn get_webauthn(data: JsonUpcase<PasswordOrOtpData>, headers: Headers, mut conn: DbConn) -> JsonResult {
     if !CONFIG.domain_set() {
         err!("`DOMAIN` environment variable is not set. Webauthn disabled")
     }
 
-    if !headers.user.check_valid_password(&data.data.MasterPasswordHash) {
-        err!("Invalid password");
-    }
+    let data: PasswordOrOtpData = data.into_inner().data;
+    let user = headers.user;
 
-    let (enabled, registrations) = get_webauthn_registrations(&headers.user.uuid, &mut conn).await?;
+    data.validate(&user, false, &mut conn).await?;
+
+    let (enabled, registrations) = get_webauthn_registrations(&user.uuid, &mut conn).await?;
     let registrations_json: Vec<Value> = registrations.iter().map(WebauthnRegistration::to_json).collect();
 
     Ok(Json(json!({
@@ -123,12 +124,17 @@ async fn get_webauthn(data: JsonUpcase<PasswordData>, headers: Headers, mut conn
 }
 
 #[post("/two-factor/get-webauthn-challenge", data = "<data>")]
-async fn generate_webauthn_challenge(data: JsonUpcase<PasswordData>, headers: Headers, mut conn: DbConn) -> JsonResult {
-    if !headers.user.check_valid_password(&data.data.MasterPasswordHash) {
-        err!("Invalid password");
-    }
+async fn generate_webauthn_challenge(
+    data: JsonUpcase<PasswordOrOtpData>,
+    headers: Headers,
+    mut conn: DbConn,
+) -> JsonResult {
+    let data: PasswordOrOtpData = data.into_inner().data;
+    let user = headers.user;
 
-    let registrations = get_webauthn_registrations(&headers.user.uuid, &mut conn)
+    data.validate(&user, false, &mut conn).await?;
+
+    let registrations = get_webauthn_registrations(&user.uuid, &mut conn)
         .await?
         .1
         .into_iter()
@@ -136,16 +142,16 @@ async fn generate_webauthn_challenge(data: JsonUpcase<PasswordData>, headers: He
         .collect();
 
     let (challenge, state) = WebauthnConfig::load().generate_challenge_register_options(
-        headers.user.uuid.as_bytes().to_vec(),
-        headers.user.email,
-        headers.user.name,
+        user.uuid.as_bytes().to_vec(),
+        user.email,
+        user.name,
         Some(registrations),
         None,
         None,
     )?;
 
     let type_ = TwoFactorType::WebauthnRegisterChallenge;
-    TwoFactor::new(headers.user.uuid, type_, serde_json::to_string(&state)?).save(&mut conn).await?;
+    TwoFactor::new(user.uuid, type_, serde_json::to_string(&state)?).save(&mut conn).await?;
 
     let mut challenge_value = serde_json::to_value(challenge.public_key)?;
     challenge_value["status"] = "ok".into();
@@ -158,8 +164,9 @@ async fn generate_webauthn_challenge(data: JsonUpcase<PasswordData>, headers: He
 struct EnableWebauthnData {
     Id: NumberOrString, // 1..5
     Name: String,
-    MasterPasswordHash: String,
     DeviceResponse: RegisterPublicKeyCredentialCopy,
+    MasterPasswordHash: Option<String>,
+    Otp: Option<String>,
 }
 
 // This is copied from RegisterPublicKeyCredential to change the Response objects casing
@@ -242,18 +249,16 @@ impl From<PublicKeyCredentialCopy> for PublicKeyCredential {
 }
 
 #[post("/two-factor/webauthn", data = "<data>")]
-async fn activate_webauthn(
-    data: JsonUpcase<EnableWebauthnData>,
-    headers: Headers,
-    mut conn: DbConn,
-    ip: ClientIp,
-) -> JsonResult {
+async fn activate_webauthn(data: JsonUpcase<EnableWebauthnData>, headers: Headers, mut conn: DbConn) -> JsonResult {
     let data: EnableWebauthnData = data.into_inner().data;
     let mut user = headers.user;
 
-    if !user.check_valid_password(&data.MasterPasswordHash) {
-        err!("Invalid password");
+    PasswordOrOtpData {
+        MasterPasswordHash: data.MasterPasswordHash,
+        Otp: data.Otp,
     }
+    .validate(&user, true, &mut conn)
+    .await?;
 
     // Retrieve and delete the saved challenge state
     let type_ = TwoFactorType::WebauthnRegisterChallenge as i32;
@@ -286,7 +291,7 @@ async fn activate_webauthn(
         .await?;
     _generate_recover_code(&mut user, &mut conn).await;
 
-    log_user_event(EventType::UserUpdated2fa as i32, &user.uuid, headers.device.atype, &ip.ip, &mut conn).await;
+    log_user_event(EventType::UserUpdated2fa as i32, &user.uuid, headers.device.atype, &headers.ip.ip, &mut conn).await;
 
     let keys_json: Vec<Value> = registrations.iter().map(WebauthnRegistration::to_json).collect();
     Ok(Json(json!({
@@ -297,13 +302,8 @@ async fn activate_webauthn(
 }
 
 #[put("/two-factor/webauthn", data = "<data>")]
-async fn activate_webauthn_put(
-    data: JsonUpcase<EnableWebauthnData>,
-    headers: Headers,
-    conn: DbConn,
-    ip: ClientIp,
-) -> JsonResult {
-    activate_webauthn(data, headers, conn, ip).await
+async fn activate_webauthn_put(data: JsonUpcase<EnableWebauthnData>, headers: Headers, conn: DbConn) -> JsonResult {
+    activate_webauthn(data, headers, conn).await
 }
 
 #[derive(Deserialize, Debug)]

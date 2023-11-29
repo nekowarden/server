@@ -154,8 +154,8 @@ async fn get_sends(headers: Headers, mut conn: DbConn) -> Json<Value> {
 }
 
 #[get("/sends/<uuid>")]
-async fn get_send(uuid: String, headers: Headers, mut conn: DbConn) -> JsonResult {
-    let send = match Send::find_by_uuid(&uuid, &mut conn).await {
+async fn get_send(uuid: &str, headers: Headers, mut conn: DbConn) -> JsonResult {
+    let send = match Send::find_by_uuid(uuid, &mut conn).await {
         Some(send) => send,
         None => err!("Send not found"),
     };
@@ -180,7 +180,14 @@ async fn post_send(data: JsonUpcase<SendData>, headers: Headers, mut conn: DbCon
 
     let mut send = create_send(data, headers.user.uuid)?;
     send.save(&mut conn).await?;
-    nt.send_send_update(UpdateType::SyncSendCreate, &send, &send.update_users_revision(&mut conn).await).await;
+    nt.send_send_update(
+        UpdateType::SyncSendCreate,
+        &send,
+        &send.update_users_revision(&mut conn).await,
+        &headers.device.uuid,
+        &mut conn,
+    )
+    .await;
 
     Ok(Json(send.to_json()))
 }
@@ -252,7 +259,14 @@ async fn post_send_file(data: Form<UploadData<'_>>, headers: Headers, mut conn: 
 
     // Save the changes in the database
     send.save(&mut conn).await?;
-    nt.send_send_update(UpdateType::SyncSendCreate, &send, &send.update_users_revision(&mut conn).await).await;
+    nt.send_send_update(
+        UpdateType::SyncSendCreate,
+        &send,
+        &send.update_users_revision(&mut conn).await,
+        &headers.device.uuid,
+        &mut conn,
+    )
+    .await;
 
     Ok(Json(send.to_json()))
 }
@@ -315,8 +329,8 @@ async fn post_send_file_v2(data: JsonUpcase<SendData>, headers: Headers, mut con
 // https://github.com/bitwarden/server/blob/d0c793c95181dfb1b447eb450f85ba0bfd7ef643/src/Api/Controllers/SendsController.cs#L243
 #[post("/sends/<send_uuid>/file/<file_id>", format = "multipart/form-data", data = "<data>")]
 async fn post_send_file_v2_data(
-    send_uuid: String,
-    file_id: String,
+    send_uuid: &str,
+    file_id: &str,
     data: Form<UploadDataV2<'_>>,
     headers: Headers,
     mut conn: DbConn,
@@ -326,19 +340,33 @@ async fn post_send_file_v2_data(
 
     let mut data = data.into_inner();
 
-    if let Some(send) = Send::find_by_uuid(&send_uuid, &mut conn).await {
-        let folder_path = tokio::fs::canonicalize(&CONFIG.sends_folder()).await?.join(&send_uuid);
-        let file_path = folder_path.join(&file_id);
-        tokio::fs::create_dir_all(&folder_path).await?;
+    let Some(send) = Send::find_by_uuid(send_uuid, &mut conn).await else {
+        err!("Send not found. Unable to save the file.")
+    };
 
-        if let Err(_err) = data.data.persist_to(&file_path).await {
-            data.data.move_copy_to(file_path).await?
-        }
-
-        nt.send_send_update(UpdateType::SyncSendCreate, &send, &send.update_users_revision(&mut conn).await).await;
-    } else {
-        err!("Send not found. Unable to save the file.");
+    let Some(send_user_id) = &send.user_uuid else {
+        err!("Sends are only supported for users at the moment")
+    };
+    if send_user_id != &headers.user.uuid {
+        err!("Send doesn't belong to user");
     }
+
+    let folder_path = tokio::fs::canonicalize(&CONFIG.sends_folder()).await?.join(send_uuid);
+    let file_path = folder_path.join(file_id);
+    tokio::fs::create_dir_all(&folder_path).await?;
+
+    if let Err(_err) = data.data.persist_to(&file_path).await {
+        data.data.move_copy_to(file_path).await?
+    }
+
+    nt.send_send_update(
+        UpdateType::SyncSendCreate,
+        &send,
+        &send.update_users_revision(&mut conn).await,
+        &headers.device.uuid,
+        &mut conn,
+    )
+    .await;
 
     Ok(())
 }
@@ -351,13 +379,13 @@ pub struct SendAccessData {
 
 #[post("/sends/access/<access_id>", data = "<data>")]
 async fn post_access(
-    access_id: String,
+    access_id: &str,
     data: JsonUpcase<SendAccessData>,
     mut conn: DbConn,
     ip: ClientIp,
     nt: Notify<'_>,
 ) -> JsonResult {
-    let mut send = match Send::find_by_access_id(&access_id, &mut conn).await {
+    let mut send = match Send::find_by_access_id(access_id, &mut conn).await {
         Some(s) => s,
         None => err_code!(SEND_INACCESSIBLE_MSG, 404),
     };
@@ -397,21 +425,28 @@ async fn post_access(
 
     send.save(&mut conn).await?;
 
-    nt.send_send_update(UpdateType::SyncSendUpdate, &send, &send.update_users_revision(&mut conn).await).await;
+    nt.send_send_update(
+        UpdateType::SyncSendUpdate,
+        &send,
+        &send.update_users_revision(&mut conn).await,
+        &String::from("00000000-0000-0000-0000-000000000000"),
+        &mut conn,
+    )
+    .await;
 
     Ok(Json(send.to_json_access(&mut conn).await))
 }
 
 #[post("/sends/<send_id>/access/file/<file_id>", data = "<data>")]
 async fn post_access_file(
-    send_id: String,
-    file_id: String,
+    send_id: &str,
+    file_id: &str,
     data: JsonUpcase<SendAccessData>,
     host: Host,
     mut conn: DbConn,
     nt: Notify<'_>,
 ) -> JsonResult {
-    let mut send = match Send::find_by_uuid(&send_id, &mut conn).await {
+    let mut send = match Send::find_by_uuid(send_id, &mut conn).await {
         Some(s) => s,
         None => err_code!(SEND_INACCESSIBLE_MSG, 404),
     };
@@ -448,9 +483,16 @@ async fn post_access_file(
 
     send.save(&mut conn).await?;
 
-    nt.send_send_update(UpdateType::SyncSendUpdate, &send, &send.update_users_revision(&mut conn).await).await;
+    nt.send_send_update(
+        UpdateType::SyncSendUpdate,
+        &send,
+        &send.update_users_revision(&mut conn).await,
+        &String::from("00000000-0000-0000-0000-000000000000"),
+        &mut conn,
+    )
+    .await;
 
-    let token_claims = crate::auth::generate_send_claims(&send_id, &file_id);
+    let token_claims = crate::auth::generate_send_claims(send_id, file_id);
     let token = crate::auth::encode_jwt(&token_claims);
     Ok(Json(json!({
         "Object": "send-fileDownload",
@@ -460,8 +502,8 @@ async fn post_access_file(
 }
 
 #[get("/sends/<send_id>/<file_id>?<t>")]
-async fn download_send(send_id: SafeString, file_id: SafeString, t: String) -> Option<NamedFile> {
-    if let Ok(claims) = crate::auth::decode_send(&t) {
+async fn download_send(send_id: SafeString, file_id: SafeString, t: &str) -> Option<NamedFile> {
+    if let Ok(claims) = crate::auth::decode_send(t) {
         if claims.sub == format!("{send_id}/{file_id}") {
             return NamedFile::open(Path::new(&CONFIG.sends_folder()).join(send_id).join(file_id)).await.ok();
         }
@@ -471,7 +513,7 @@ async fn download_send(send_id: SafeString, file_id: SafeString, t: String) -> O
 
 #[put("/sends/<id>", data = "<data>")]
 async fn put_send(
-    id: String,
+    id: &str,
     data: JsonUpcase<SendData>,
     headers: Headers,
     mut conn: DbConn,
@@ -482,7 +524,7 @@ async fn put_send(
     let data: SendData = data.into_inner().data;
     enforce_disable_hide_email_policy(&data, &headers, &mut conn).await?;
 
-    let mut send = match Send::find_by_uuid(&id, &mut conn).await {
+    let mut send = match Send::find_by_uuid(id, &mut conn).await {
         Some(s) => s,
         None => err!("Send not found"),
     };
@@ -530,14 +572,21 @@ async fn put_send(
     }
 
     send.save(&mut conn).await?;
-    nt.send_send_update(UpdateType::SyncSendUpdate, &send, &send.update_users_revision(&mut conn).await).await;
+    nt.send_send_update(
+        UpdateType::SyncSendUpdate,
+        &send,
+        &send.update_users_revision(&mut conn).await,
+        &headers.device.uuid,
+        &mut conn,
+    )
+    .await;
 
     Ok(Json(send.to_json()))
 }
 
 #[delete("/sends/<id>")]
-async fn delete_send(id: String, headers: Headers, mut conn: DbConn, nt: Notify<'_>) -> EmptyResult {
-    let send = match Send::find_by_uuid(&id, &mut conn).await {
+async fn delete_send(id: &str, headers: Headers, mut conn: DbConn, nt: Notify<'_>) -> EmptyResult {
+    let send = match Send::find_by_uuid(id, &mut conn).await {
         Some(s) => s,
         None => err!("Send not found"),
     };
@@ -547,16 +596,23 @@ async fn delete_send(id: String, headers: Headers, mut conn: DbConn, nt: Notify<
     }
 
     send.delete(&mut conn).await?;
-    nt.send_send_update(UpdateType::SyncSendDelete, &send, &send.update_users_revision(&mut conn).await).await;
+    nt.send_send_update(
+        UpdateType::SyncSendDelete,
+        &send,
+        &send.update_users_revision(&mut conn).await,
+        &headers.device.uuid,
+        &mut conn,
+    )
+    .await;
 
     Ok(())
 }
 
 #[put("/sends/<id>/remove-password")]
-async fn put_remove_password(id: String, headers: Headers, mut conn: DbConn, nt: Notify<'_>) -> JsonResult {
+async fn put_remove_password(id: &str, headers: Headers, mut conn: DbConn, nt: Notify<'_>) -> JsonResult {
     enforce_disable_send_policy(&headers, &mut conn).await?;
 
-    let mut send = match Send::find_by_uuid(&id, &mut conn).await {
+    let mut send = match Send::find_by_uuid(id, &mut conn).await {
         Some(s) => s,
         None => err!("Send not found"),
     };
@@ -567,7 +623,14 @@ async fn put_remove_password(id: String, headers: Headers, mut conn: DbConn, nt:
 
     send.set_password(None);
     send.save(&mut conn).await?;
-    nt.send_send_update(UpdateType::SyncSendUpdate, &send, &send.update_users_revision(&mut conn).await).await;
+    nt.send_send_update(
+        UpdateType::SyncSendUpdate,
+        &send,
+        &send.update_users_revision(&mut conn).await,
+        &headers.device.uuid,
+        &mut conn,
+    )
+    .await;
 
     Ok(Json(send.to_json()))
 }

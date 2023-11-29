@@ -1,3 +1,4 @@
+use std::env::consts::EXE_SUFFIX;
 use std::process::exit;
 use std::sync::RwLock;
 
@@ -18,7 +19,7 @@ static CONFIG_FILE: Lazy<String> = Lazy::new(|| {
 
 pub static CONFIG: Lazy<Config> = Lazy::new(|| {
     Config::load().unwrap_or_else(|e| {
-        println!("Error loading config:\n\t{e:?}\n");
+        println!("Error loading config:\n  {e:?}\n");
         exit(12)
     })
 });
@@ -125,7 +126,7 @@ macro_rules! make_config {
 
                 if show_overrides && !overrides.is_empty() {
                     // We can't use warn! here because logging isn't setup yet.
-                    println!("[WARNING] The following environment variables are being overriden by the config.json file.");
+                    println!("[WARNING] The following environment variables are being overridden by the config.json file.");
                     println!("[WARNING] Please use the admin panel to make changes to them:");
                     println!("[WARNING] {}\n", overrides.join(", "));
                 }
@@ -140,6 +141,8 @@ macro_rules! make_config {
                     config.$name = make_config!{ @build self.$name.clone(), &config, $none_action, $($default)? };
                 )+)+
                 config.domain_set = _domain_set;
+
+                config.domain = config.domain.trim_end_matches('/').to_string();
 
                 config.signups_domains_whitelist = config.signups_domains_whitelist.trim().to_lowercase();
                 config.org_creation_users = config.org_creation_users.trim().to_lowercase();
@@ -161,7 +164,7 @@ macro_rules! make_config {
             )+)+
 
             pub fn prepare_json(&self) -> serde_json::Value {
-                let (def, cfg, overriden) = {
+                let (def, cfg, overridden) = {
                     let inner = &self.inner.read().unwrap();
                     (inner._env.build(), inner.config.clone(), inner._overrides.clone())
                 };
@@ -208,7 +211,7 @@ macro_rules! make_config {
                                 element.insert("default".into(), serde_json::to_value(def.$name).unwrap());
                                 element.insert("type".into(), (_get_form_type(stringify!($ty))).into());
                                 element.insert("doc".into(), (_get_doc(concat!($($doc),+))).into());
-                                element.insert("overridden".into(), (overriden.contains(&paste::paste!(stringify!([<$name:upper>])).into())).into());
+                                element.insert("overridden".into(), (overridden.contains(&paste::paste!(stringify!([<$name:upper>])).into())).into());
                                 element
                             }),
                         )+
@@ -374,6 +377,16 @@ make_config! {
         /// Websocket port
         websocket_port:         u16,    false,  def,    3012;
     },
+    push {
+        /// Enable push notifications
+        push_enabled:           bool,   false,  def,    false;
+        /// Push relay base uri
+        push_relay_uri:         String, false,  def,    "https://push.bitwarden.com".to_string();
+        /// Installation id |> The installation id from https://bitwarden.com/host
+        push_installation_id:   Pass,   false,  def,    String::new();
+        /// Installation key |> The installation key from https://bitwarden.com/host
+        push_installation_key:  Pass,   false,  def,    String::new();
+    },
     jobs {
         /// Job scheduler poll interval |> How often the job scheduler thread checks for jobs to run.
         /// Set to 0 to globally disable scheduled jobs.
@@ -396,6 +409,10 @@ make_config! {
         /// Event cleanup schedule |> Cron schedule of the job that cleans old events from the event table.
         /// Defaults to daily. Set blank to disable this job.
         event_cleanup_schedule:   String, false,  def,    "0 10 0 * * *".to_string();
+        /// Auth Request cleanup schedule |> Cron schedule of the job that cleans old auth requests from the auth request.
+        /// Defaults to every minute. Set blank to disable this job.
+        auth_request_purge_schedule:   String, false,  def,    "30 * * * * *".to_string();
+
     },
 
     /// General settings
@@ -463,6 +480,8 @@ make_config! {
         invitation_expiration_hours: u32, false, def, 120;
         /// Allow emergency access |> Controls whether users can enable emergency access to their accounts. This setting applies globally to all users.
         emergency_access_allowed:    bool,   true,   def,    true;
+        /// Allow email change |> Controls whether users can change their email. This setting applies globally to all users.
+        email_change_allowed:    bool,   true,   def,    true;
         /// Password iterations |> Number of server-side passwords hashing iterations for the password hash.
         /// The default for new users. If changed, it will be updated during login for existing users.
         password_iterations:    i32,    true,   def,    600_000;
@@ -473,13 +492,13 @@ make_config! {
         /// provides unauthenticated access to potentially sensitive data.
         show_password_hint:     bool,   true,   def,    false;
 
-        /// Admin page token |> The token used to authenticate in this very same page. Changing it here won't deauthorize the current session
+        /// Admin token/Argon2 PHC |> The plain text token or Argon2 PHC string used to authenticate in this very same page. Changing it here will not deauthorize the current session!
         admin_token:            Pass,   true,   option;
 
         /// Invitation organization name |> Name shown in the invitation emails that don't come from a specific organization
         invitation_org_name:    String, true,   def,    "Vaultwarden".to_string();
 
-        /// Events days retain |> Number of days to retain events stored in the database. If unset, events are kept indefently.
+        /// Events days retain |> Number of days to retain events stored in the database. If unset, events are kept indefinitely.
         events_days_retain:     i64,    false,   option;
     },
 
@@ -507,7 +526,7 @@ make_config! {
         /// has been decided on, consider using permanent redirects for cacheability. The legacy codes
         /// are currently better supported by the Bitwarden clients.
         icon_redirect_code:     u32,    true,   def,    302;
-        /// Positive icon cache expiry |> Number of seconds to consider that an already cached icon is fresh. After this period, the icon will be redownloaded
+        /// Positive icon cache expiry |> Number of seconds to consider that an already cached icon is fresh. After this period, the icon will be refreshed
         icon_cache_ttl:         u64,    true,   def,    2_592_000;
         /// Negative icon cache expiry |> Number of seconds before trying to download an icon that failed again.
         icon_cache_negttl:      u64,    true,   def,    259_200;
@@ -517,7 +536,7 @@ make_config! {
         /// Useful to hide other servers in the local network. Check the WIKI for more details
         icon_blacklist_regex:   String, true,   option;
         /// Icon blacklist non global IPs |> Any IP which is not defined as a global IP will be blacklisted.
-        /// Usefull to secure your internal environment: See https://en.wikipedia.org/wiki/Reserved_IP_addresses for a list of IPs which it will block
+        /// Useful to secure your internal environment: See https://en.wikipedia.org/wiki/Reserved_IP_addresses for a list of IPs which it will block
         icon_blacklist_non_global_ips:  bool,   true,   def,    true;
 
         /// Disable Two-Factor remember |> Enabling this would force the users to use a second factor to login every time.
@@ -553,7 +572,7 @@ make_config! {
         /// Max database connection retries |> Number of times to retry the database connection during startup, with 1 second between each retry, set to 0 to retry indefinitely
         db_connection_retries:  u32,    false,  def,    15;
 
-        /// Timeout when aquiring database connection
+        /// Timeout when acquiring database connection
         database_timeout:       u64,    false,  def,    30;
 
         /// Database connection pool size
@@ -578,6 +597,9 @@ make_config! {
         /// Max burst size for admin login requests |> Allow a burst of requests of up to this size, while maintaining the average indicated by `admin_ratelimit_seconds`
         admin_ratelimit_max_burst:     u32, false, def, 3;
 
+        /// Admin session lifetime |> Set the lifetime of admin sessions to this value (in minutes).
+        admin_session_lifetime:        i64, true,  def, 20;
+
         /// Enable groups (BETA!) (Know the risks!) |> Enables groups support for organizations (Currently contains known issues!).
         org_groups_enabled:     bool,   false,  def,    false;
     },
@@ -597,7 +619,7 @@ make_config! {
     /// Global Duo settings (Note that users can override them)
     duo: _enable_duo {
         /// Enabled
-        _enable_duo:            bool,   true,   def,     false;
+        _enable_duo:            bool,   true,   def,     true;
         /// Integration Key
         duo_ikey:               String, true,   option;
         /// Secret Key
@@ -612,6 +634,10 @@ make_config! {
     smtp: _enable_smtp {
         /// Enabled
         _enable_smtp:                  bool,   true,   def,     true;
+        /// Use Sendmail |> Whether to send mail via the `sendmail` command
+        use_sendmail:                  bool,   true,   def,     false;
+        /// Sendmail Command |> Which sendmail command to use. The one found in the $PATH is used if not specified.
+        sendmail_command:              String, true,   option;
         /// Host
         smtp_host:                     String, true,   option;
         /// DEPRECATED smtp_ssl |> DEPRECATED - Please use SMTP_SECURITY
@@ -651,7 +677,7 @@ make_config! {
     /// Email 2FA Settings
     email_2fa: _enable_email_2fa {
         /// Enabled |> Disabling will prevent users from setting up new email 2FA and using existing email 2FA configured
-        _enable_email_2fa:      bool,   true,   auto,    |c| c._enable_smtp && c.smtp_host.is_some();
+        _enable_email_2fa:      bool,   true,   auto,    |c| c._enable_smtp && (c.smtp_host.is_some() || c.use_sendmail);
         /// Email token size |> Number of digits in an email 2FA token (min: 6, max: 255). Note that the Bitwarden clients are hardcoded to mention 6 digit codes regardless of this setting.
         email_token_size:       u8,     true,   def,      6;
         /// Token expiration time |> Maximum time in seconds a token is valid. The time the user has to open email client and copy token.
@@ -714,6 +740,17 @@ fn validate_config(cfg: &ConfigItems) -> Result<(), Error> {
         }
     }
 
+    if cfg.push_enabled && (cfg.push_installation_id == String::new() || cfg.push_installation_key == String::new()) {
+        err!(
+            "Misconfigured Push Notification service\n\
+            ########################################################################################\n\
+            # It looks like you enabled Push Notification feature, but didn't configure it         #\n\
+            # properly. Make sure the installation id and key from https://bitwarden.com/host are  #\n\
+            # added to your configuration.                                                         #\n\
+            ########################################################################################\n"
+        )
+    }
+
     if cfg._enable_duo
         && (cfg.duo_host.is_some() || cfg.duo_ikey.is_some() || cfg.duo_skey.is_some())
         && !(cfg.duo_host.is_some() && cfg.duo_ikey.is_some() && cfg.duo_skey.is_some())
@@ -742,25 +779,60 @@ fn validate_config(cfg: &ConfigItems) -> Result<(), Error> {
             ),
         }
 
-        if cfg.smtp_host.is_some() == cfg.smtp_from.is_empty() {
-            err!("Both `SMTP_HOST` and `SMTP_FROM` need to be set for email support")
+        if cfg.use_sendmail {
+            let command = cfg.sendmail_command.clone().unwrap_or_else(|| format!("sendmail{EXE_SUFFIX}"));
+
+            let mut path = std::path::PathBuf::from(&command);
+
+            if !path.is_absolute() {
+                match which::which(&command) {
+                    Ok(result) => path = result,
+                    Err(_) => err!(format!("sendmail command {command:?} not found in $PATH")),
+                }
+            }
+
+            match path.metadata() {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    err!(format!("sendmail command not found at `{path:?}`"))
+                }
+                Err(err) => {
+                    err!(format!("failed to access sendmail command at `{path:?}`: {err}"))
+                }
+                Ok(metadata) => {
+                    if metadata.is_dir() {
+                        err!(format!("sendmail command at `{path:?}` isn't a directory"));
+                    }
+
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if !metadata.permissions().mode() & 0o111 != 0 {
+                            err!(format!("sendmail command at `{path:?}` isn't executable"));
+                        }
+                    }
+                }
+            }
+        } else {
+            if cfg.smtp_host.is_some() == cfg.smtp_from.is_empty() {
+                err!("Both `SMTP_HOST` and `SMTP_FROM` need to be set for email support without `USE_SENDMAIL`")
+            }
+
+            if cfg.smtp_username.is_some() != cfg.smtp_password.is_some() {
+                err!("Both `SMTP_USERNAME` and `SMTP_PASSWORD` need to be set to enable email authentication without `USE_SENDMAIL`")
+            }
         }
 
-        if cfg.smtp_host.is_some() && !cfg.smtp_from.contains('@') {
+        if (cfg.smtp_host.is_some() || cfg.use_sendmail) && !cfg.smtp_from.contains('@') {
             err!("SMTP_FROM does not contain a mandatory @ sign")
-        }
-
-        if cfg.smtp_username.is_some() != cfg.smtp_password.is_some() {
-            err!("Both `SMTP_USERNAME` and `SMTP_PASSWORD` need to be set to enable email authentication")
-        }
-
-        if cfg._enable_email_2fa && (!cfg._enable_smtp || cfg.smtp_host.is_none()) {
-            err!("To enable email 2FA, SMTP must be configured")
         }
 
         if cfg._enable_email_2fa && cfg.email_token_size < 6 {
             err!("`EMAIL_TOKEN_SIZE` has a minimum size of 6")
         }
+    }
+
+    if cfg._enable_email_2fa && !(cfg.smtp_host.is_some() || cfg.use_sendmail) {
+        err!("To enable email 2FA, a mail transport must be configured")
     }
 
     // Check if the icon blacklist regex is valid
@@ -827,6 +899,27 @@ fn validate_config(cfg: &ConfigItems) -> Result<(), Error> {
         err!("`EVENT_CLEANUP_SCHEDULE` is not a valid cron expression")
     }
 
+    if !cfg.auth_request_purge_schedule.is_empty() && cfg.auth_request_purge_schedule.parse::<Schedule>().is_err() {
+        err!("`AUTH_REQUEST_PURGE_SCHEDULE` is not a valid cron expression")
+    }
+
+    if !cfg.disable_admin_token {
+        match cfg.admin_token.as_ref() {
+            Some(t) if t.starts_with("$argon2") => {
+                if let Err(e) = argon2::password_hash::PasswordHash::new(t) {
+                    err!(format!("The configured Argon2 PHC in `ADMIN_TOKEN` is invalid: '{e}'"))
+                }
+            }
+            Some(_) => {
+                println!(
+                    "[NOTICE] You are using a plain text `ADMIN_TOKEN` which is insecure.\n\
+                Please generate a secure Argon2 PHC string by using `vaultwarden hash` or `argon2`.\n\
+                See: https://github.com/dani-garcia/vaultwarden/wiki/Enabling-admin-page#secure-the-admin_token\n"
+                );
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -1043,7 +1136,7 @@ impl Config {
     }
     pub fn mail_enabled(&self) -> bool {
         let inner = &self.inner.read().unwrap().config;
-        inner._enable_smtp && inner.smtp_host.is_some()
+        inner._enable_smtp && (inner.smtp_host.is_some() || inner.use_sendmail)
     }
 
     pub fn get_duo_akey(&self) -> String {
@@ -1136,6 +1229,7 @@ where
     reg!("email/email_footer");
     reg!("email/email_footer_text");
 
+    reg!("email/admin_reset_password", ".html");
     reg!("email/change_email", ".html");
     reg!("email/delete_account", ".html");
     reg!("email/emergency_access_invite_accepted", ".html");
@@ -1149,17 +1243,18 @@ where
     reg!("email/invite_accepted", ".html");
     reg!("email/invite_confirmed", ".html");
     reg!("email/new_device_logged_in", ".html");
+    reg!("email/protected_action", ".html");
     reg!("email/pw_hint_none", ".html");
     reg!("email/pw_hint_some", ".html");
     reg!("email/send_2fa_removed_from_org", ".html");
-    reg!("email/send_single_org_removed_from_org", ".html");
-    reg!("email/send_org_invite", ".html");
     reg!("email/send_emergency_access_invite", ".html");
+    reg!("email/send_org_invite", ".html");
+    reg!("email/send_single_org_removed_from_org", ".html");
+    reg!("email/smtp_test", ".html");
     reg!("email/twofactor_email", ".html");
     reg!("email/verify_email", ".html");
-    reg!("email/welcome", ".html");
     reg!("email/welcome_must_verify", ".html");
-    reg!("email/smtp_test", ".html");
+    reg!("email/welcome", ".html");
 
     reg!("admin/base");
     reg!("admin/login");

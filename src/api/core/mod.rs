@@ -4,9 +4,11 @@ mod emergency_access;
 mod events;
 mod folders;
 mod organizations;
+mod public;
 mod sends;
 pub mod two_factor;
 
+pub use accounts::purge_auth_requests;
 pub use ciphers::{purge_trashed_ciphers, CipherData, CipherSyncData, CipherSyncType};
 pub use emergency_access::{emergency_notification_reminder_job, emergency_request_timeout_job};
 pub use events::{event_cleanup_job, log_event, log_user_event};
@@ -14,7 +16,6 @@ pub use sends::purge_sends;
 pub use two_factor::send_incomplete_2fa_notifications;
 
 pub fn routes() -> Vec<Route> {
-    let mut device_token_routes = routes![clear_device_token, put_device_token];
     let mut eq_domains_routes = routes![get_eq_domains, post_eq_domains, put_eq_domains];
     let mut hibp_routes = routes![hibp_breach];
     let mut meta_routes = routes![alive, now, version, config];
@@ -28,7 +29,7 @@ pub fn routes() -> Vec<Route> {
     routes.append(&mut organizations::routes());
     routes.append(&mut two_factor::routes());
     routes.append(&mut sends::routes());
-    routes.append(&mut device_token_routes);
+    routes.append(&mut public::routes());
     routes.append(&mut eq_domains_routes);
     routes.append(&mut hibp_routes);
     routes.append(&mut meta_routes);
@@ -56,37 +57,6 @@ use crate::{
     error::Error,
     util::get_reqwest_client,
 };
-
-#[put("/devices/identifier/<uuid>/clear-token")]
-fn clear_device_token(uuid: String) -> &'static str {
-    // This endpoint doesn't have auth header
-
-    let _ = uuid;
-    // uuid is not related to deviceId
-
-    // This only clears push token
-    // https://github.com/bitwarden/core/blob/master/src/Api/Controllers/DevicesController.cs#L109
-    // https://github.com/bitwarden/core/blob/master/src/Core/Services/Implementations/DeviceService.cs#L37
-    ""
-}
-
-#[put("/devices/identifier/<uuid>/token", data = "<data>")]
-fn put_device_token(uuid: String, data: JsonUpcase<Value>, headers: Headers) -> Json<Value> {
-    let _data: Value = data.into_inner().data;
-    // Data has a single string value "PushToken"
-    let _ = uuid;
-    // uuid is not related to deviceId
-
-    // TODO: This should save the push token, but we don't have push functionality
-
-    Json(json!({
-        "Id": headers.device.uuid,
-        "Name": headers.device.name,
-        "Type": headers.device.atype,
-        "Identifier": headers.device.uuid,
-        "CreationDate": crate::util::format_date(&headers.device.created_at),
-    }))
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[allow(non_snake_case)]
@@ -170,7 +140,7 @@ async fn put_eq_domains(
 }
 
 #[get("/hibp/breach?<username>")]
-async fn hibp_breach(username: String) -> JsonResult {
+async fn hibp_breach(username: &str) -> JsonResult {
     let url = format!(
         "https://haveibeenpwned.com/api/v3/breachedaccount/{username}?truncateResponse=false&includeUnverified=false"
     );
@@ -224,11 +194,17 @@ fn version() -> Json<&'static str> {
 fn config() -> Json<Value> {
     let domain = crate::CONFIG.domain();
     Json(json!({
-        "version": crate::VERSION,
+        // Note: The clients use this version to handle backwards compatibility concerns
+        // This means they expect a version that closely matches the Bitwarden server version
+        // We should make sure that we keep this updated when we support the new server features
+        // Version history:
+        // - Individual cipher key encryption: 2023.9.1
+        "version": "2023.9.1",
         "gitHash": option_env!("GIT_REV"),
         "server": {
           "name": "Vaultwarden",
-          "url": "https://github.com/dani-garcia/vaultwarden"
+          "url": "https://github.com/dani-garcia/vaultwarden",
+          "version": crate::VERSION
         },
         "environment": {
           "vault": domain,
@@ -237,6 +213,14 @@ fn config() -> Json<Value> {
           "notifications": format!("{domain}/notifications"),
           "sso": "",
         },
+        "featureStates": {
+          // Any feature flags that we want the clients to use
+          // Can check the enabled ones at:
+          // https://vault.bitwarden.com/api/config
+          "fido2-vault-credentials": true,  // Passkey support
+          "autofill-v2": false,             // Disabled because it is causing issues https://github.com/dani-garcia/vaultwarden/discussions/4052
+        },
+        "object": "config",
     }))
 }
 

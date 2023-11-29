@@ -18,7 +18,7 @@ fn main() {
     );
 
     #[cfg(all(not(debug_assertions), feature = "query_logger"))]
-    compile_error!("Query Logging is only allowed during development, it is not intented for production usage!");
+    compile_error!("Query Logging is only allowed during development, it is not intended for production usage!");
 
     // Support $BWRS_VERSION for legacy compatibility, but default to $VW_VERSION.
     // If neither exist, read from git.
@@ -72,7 +72,7 @@ fn version_from_git_info() -> Result<String, std::io::Error> {
     // Combined version
     if let Some(exact) = exact_tag {
         Ok(exact)
-    } else if &branch != "main" && &branch != "master" {
+    } else if &branch != "main" && &branch != "master" && &branch != "HEAD" {
         Ok(format!("{last_tag}-{rev_short} ({branch})"))
     } else {
         Ok(format!("{last_tag}-{rev_short}"))

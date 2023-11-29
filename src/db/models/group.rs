@@ -10,7 +10,7 @@ db_object! {
         pub organizations_uuid: String,
         pub name: String,
         pub access_all: bool,
-        external_id: Option<String>,
+        pub external_id: Option<String>,
         pub creation_date: NaiveDateTime,
         pub revision_date: NaiveDateTime,
     }
@@ -64,27 +64,41 @@ impl Group {
             "AccessAll": self.access_all,
             "ExternalId": self.external_id,
             "CreationDate": format_date(&self.creation_date),
-            "RevisionDate": format_date(&self.revision_date)
+            "RevisionDate": format_date(&self.revision_date),
+            "Object": "group"
+        })
+    }
+
+    pub async fn to_json_details(&self, conn: &mut DbConn) -> Value {
+        let collections_groups: Vec<Value> = CollectionGroup::find_by_group(&self.uuid, conn)
+            .await
+            .iter()
+            .map(|entry| {
+                json!({
+                    "Id": entry.collections_uuid,
+                    "ReadOnly": entry.read_only,
+                    "HidePasswords": entry.hide_passwords
+                })
+            })
+            .collect();
+
+        json!({
+            "Id": self.uuid,
+            "OrganizationId": self.organizations_uuid,
+            "Name": self.name,
+            "AccessAll": self.access_all,
+            "ExternalId": self.external_id,
+            "Collections": collections_groups,
+            "Object": "groupDetails"
         })
     }
 
     pub fn set_external_id(&mut self, external_id: Option<String>) {
-        //Check if external id is empty. We don't want to have
-        //empty strings in the database
-        match external_id {
-            Some(external_id) => {
-                if external_id.is_empty() {
-                    self.external_id = None;
-                } else {
-                    self.external_id = Some(external_id)
-                }
-            }
-            None => self.external_id = None,
-        }
-    }
-
-    pub fn get_external_id(&self) -> Option<String> {
-        self.external_id.clone()
+        // Check if external_id is empty. We do not want to have empty strings in the database
+        self.external_id = match external_id {
+            Some(external_id) if !external_id.trim().is_empty() => Some(external_id),
+            _ => None,
+        };
     }
 }
 
@@ -151,6 +165,13 @@ impl Group {
         }
     }
 
+    pub async fn delete_all_by_organization(org_uuid: &str, conn: &mut DbConn) -> EmptyResult {
+        for group in Self::find_by_organization(org_uuid, conn).await {
+            group.delete(conn).await?;
+        }
+        Ok(())
+    }
+
     pub async fn find_by_organization(organizations_uuid: &str, conn: &mut DbConn) -> Vec<Self> {
         db_run! { conn: {
             groups::table
@@ -158,6 +179,17 @@ impl Group {
                 .load::<GroupDb>(conn)
                 .expect("Error loading groups")
                 .from_db()
+        }}
+    }
+
+    pub async fn count_by_org(organizations_uuid: &str, conn: &mut DbConn) -> i64 {
+        db_run! { conn: {
+            groups::table
+                .filter(groups::organizations_uuid.eq(organizations_uuid))
+                .count()
+                .first::<i64>(conn)
+                .ok()
+                .unwrap_or(0)
         }}
     }
 
@@ -171,6 +203,15 @@ impl Group {
         }}
     }
 
+    pub async fn find_by_external_id(id: &str, conn: &mut DbConn) -> Option<Self> {
+        db_run! { conn: {
+            groups::table
+                .filter(groups::external_id.eq(id))
+                .first::<GroupDb>(conn)
+                .ok()
+                .from_db()
+        }}
+    }
     //Returns all organizations the user has full access to
     pub async fn gather_user_organizations_full_access(user_uuid: &str, conn: &mut DbConn) -> Vec<String> {
         db_run! { conn: {
