@@ -43,9 +43,9 @@ variable "BASE_TAGS" {
 
 // Which container registries should be used for the tagging
 // This can be a comma separated value
-// Use a full URI like `ghcr.io/dani-garcia/vaultwarden,docker.io/vaultwarden/server`
+// Use a full URI like `ghcr.io/nekowarden/server,docker.io/nekowarden/server`
 variable "CONTAINER_REGISTRIES" {
-  default = "vaultwarden/server"
+  default = "nekowarden/server"
 }
 
 
