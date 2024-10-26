@@ -487,7 +487,7 @@ pub async fn update_cipher_from_data(
 
     cipher.key = data.key;
     cipher.name = data.name;
-    cipher.r#type = data.r#type;
+    cipher.atype = data.r#type;
     cipher.notes = data.notes;
     cipher.fields = data.fields.map(|f| _clean_cipher_data(f).to_string());
     cipher.data = type_data.to_string();
