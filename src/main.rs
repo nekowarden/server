@@ -189,25 +189,19 @@ fn launch_info() {
     println!(
         "\
         /--------------------------------------------------------------------\\\n\
-        |                        Starting Vaultwarden                        |"
+        |                        Starting Nekowarden                        |"
     );
 
     if let Some(version) = VERSION {
         println!("|{:^68}|", format!("Version {version}"));
     }
 
-    println!(
-        "\
-        |--------------------------------------------------------------------|\n\
-        | This is an *unofficial* Bitwarden implementation, DO NOT use the   |\n\
-        | official channels to report bugs/features, regardless of client.   |\n\
-        | Send usage/configuration questions or feature requests to:         |\n\
-        |   https://github.com/dani-garcia/vaultwarden/discussions or        |\n\
-        |   https://vaultwarden.discourse.group/                             |\n\
-        | Report suspected bugs/issues in the software itself at:            |\n\
-        |   https://github.com/dani-garcia/vaultwarden/issues/new            |\n\
-        \\--------------------------------------------------------------------/\n"
-    );
+    println!("|--------------------------------------------------------------------|");
+    println!("| This is an *unofficial* Bitwarden implementation, DO NOT use the   |");
+    println!("| official channels to report bugs/features, regardless of client.   |");
+    println!("| Report suspected bugs/issues in the software itself at:            |");
+    println!("|   https://github.com/nekowarden/server/issues/new                  |");
+    println!("\\--------------------------------------------------------------------/\n");
 }
 
 fn init_logging(level: log::LevelFilter) -> Result<(), fern::InitError> {
